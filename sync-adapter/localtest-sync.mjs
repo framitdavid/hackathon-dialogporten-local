@@ -160,6 +160,16 @@ const statusFor = (instance) => {
   if (s.isArchived || p.ended) return 'Completed';
   const type = p.currentTask?.altinnTaskType;
   if (type === 'signing' || type === 'confirmation') return 'RequiresAttention';
+  // En instans appen har opprettet, men brukeren ikke har åpnet ennå, er ikke et utkast.
+  // Draft er i Dialogporten definert som "user-initiated dialogs not yet sent", og
+  // Utkast-visningen i arbeidsflate filtrerer på nøyaktig den statusen — så en uåpnet
+  // instans ville havnet under Utkast i stedet for i innboksen.
+  //
+  // readStatus er signalet: Altinn setter den til Read når brukeren åpner instansen.
+  // Da faller dialogen tilbake til Draft ved neste sync, som er nettopp når brukeren
+  // faktisk har begynt på den. statusFor inngår i fingerprint-en nedenfor, så
+  // overgangen synkes selv om lastChanged står stille.
+  if (s.readStatus === 'Unread') return 'NotApplicable';
   if (p.currentTask) return 'Draft';
   return 'InProgress';
 };
