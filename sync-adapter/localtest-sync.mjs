@@ -177,6 +177,42 @@ const statusFor = (instance) => {
 /** Dialogens content-felter: ContentValue med mediaType. */
 const text = (value, languageCode = 'nb') => ({ mediaType: 'text/plain', value: [{ languageCode, value }] });
 
+/** Samme form som text(), men med ferdige lokaliseringer fra applicationmetadata. */
+const localizedText = (localizations) => ({ mediaType: 'text/plain', value: localizations });
+
+/**
+ * Appens visningstittel, hentet fra applicationmetadata.
+ *
+ * Uten dette blir tittelen app-IDen ("ttkort-lege-hackaton"), som er et katalognavn og
+ * ikke noe en bruker skal lese. Metadataen ligger bak appens eget vertsnavn — LocalTest
+ * ruter på host, så /{org}/{app}/... svarer bare på local.altinn.cloud, ikke på localhost.
+ *
+ * Bufres per app: den er lik for alle instanser av samme app, og et bomtreff bufres også
+ * så en app som ikke kjører ikke gir et kall per instans.
+ */
+const appTitles = new Map();
+
+const appTitle = async (org, app) => {
+  const key = `${org}/${app}`;
+  if (appTitles.has(key)) return appTitles.get(key);
+
+  let title = null;
+  try {
+    const res = await fetch(`${LOCALTEST_BASE}/${org}/${app}/api/v1/applicationmetadata`);
+    if (res.ok) {
+      const localizations = Object.entries((await res.json())?.title ?? {})
+        .filter(([, value]) => typeof value === 'string' && value.trim())
+        .map(([languageCode, value]) => ({ languageCode, value: value.trim() }));
+      if (localizations.length) title = localizations;
+    }
+  } catch {
+    // Appen kjører ikke — da står app-IDen som tittel, som før.
+  }
+
+  appTitles.set(key, title);
+  return title;
+};
+
 /** guiActions[].title er derimot en ren liste av lokaliseringer, uten mediaType. */
 const label = (value, languageCode = 'nb') => [{ languageCode, value }];
 
@@ -191,6 +227,7 @@ const toDialog = async (instance) => {
   // Filene først: de dekker de statiske testpartene, som LocalTest-API-et ikke svarer for.
   const ownerName = partyNames.get(String(partyId)) ?? (await lookupName(instance.instanceOwner));
   const status = statusFor(instance);
+  const title = await appTitle(org, app);
   const task = instance.process?.currentTask;
   const summary = task?.name
     ? `${task.name}${task.altinnTaskType ? ` (${task.altinnTaskType})` : ''}`
@@ -209,7 +246,7 @@ const toDialog = async (instance) => {
       updatedAt: instance.lastChanged ?? instance.created,
       visibleFrom: instance.visibleAfter && Date.parse(instance.visibleAfter) > Date.now() ? instance.visibleAfter : undefined,
       content: {
-        title: text(app),
+        title: title ? localizedText(title) : text(app),
         summary: text(summary),
         senderName: text(org.toUpperCase()),
       },
