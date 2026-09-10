@@ -1,0 +1,100 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "schedule": [
+    "before 7am on Sunday",
+    "before 7am on Wednesday"
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 7am on Sunday",
+      "before 7am on Wednesday"
+    ]
+  },
+  "updateNotScheduled": false,
+  "minimumReleaseAge": "7 days",
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "minimumReleaseAge": null,
+    "schedule": ["at any time"]
+  },
+  "packageRules": [
+    {
+      "matchFileNames": ["docs/**"],
+      "schedule": ["every 3 months"]
+    },
+    {
+      "matchPackageNames": ["/^Npgsql/"],
+      "groupName": "Npgsql dependencies"
+    },
+    {
+      "matchPackageNames": ["/^Microsoft/"],
+      "groupName": "Microsoft dependencies"
+    },
+    {
+      "matchPackageNames": ["/^Serilog/"],
+      "groupName": "Serilog dependencies"
+    },
+    {
+      "matchPackageNames": ["/^ZiggyCreatures/"],
+      "groupName": "FusionCache dependencies"
+    },
+    {
+      "matchPackageNames": [
+        "/^HotChocolate/i",
+        "/^StrawberryShake/i",
+        "AppAny.HotChocolate.FluentValidation"
+      ],
+      "groupName": "HotChocolate dependencies"
+    },
+    {
+      "matchPackageNames": ["/^Azure\\./"],
+      "groupName": "Azure SDK dependencies"
+    },
+    {
+      "matchPackageNames": [
+        "/^OpenTelemetry/",
+        "/\\.OpenTelemetry$/",
+        "Azure.Monitor.OpenTelemetry.AspNetCore"
+      ],
+      "groupName": "OpenTelemetry dependencies"
+    },
+    {
+      "matchPackageNames": ["/^MassTransit/"],
+      "groupName": "MassTransit dependencies"
+    },
+    {
+      "matchPackageNames": ["/^Altinn\\./"],
+      "groupName": "Altinn dependencies"
+    },
+    {
+      "matchPackageNames": ["/^Refit/", "/^Refitter/"],
+      "groupName": "Refit dependencies"
+    },
+    {
+      "matchPackageNames": ["/^NSwag/"],
+      "groupName": "NSwag dependencies"
+    },
+    {
+      "matchPackageNames": ["/^OneOf/"],
+      "groupName": "OneOf dependencies"
+    },
+    {
+      "matchPackageNames": [
+        "/^xunit/",
+        "Microsoft.NET.Test.Sdk",
+        "Verify.XunitV3",
+        "coverlet.collector",
+        "AwesomeAssertions",
+        "NSubstitute"
+      ],
+      "groupName": "Test dependencies"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+using AsyncKeyedLock;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Events;
+using MediatR;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.Common.Events.DialogSearch;
+
+internal sealed class DialogSearchIndexer : INotificationHandler<DialogCreatedDomainEvent>, INotificationHandler<DialogUpdatedDomainEvent>
+{
+    private static readonly AsyncKeyedLocker<Guid> Semaphore = new();
+    private readonly IDialogSearchRepository _db;
+
+    public DialogSearchIndexer(IDialogSearchRepository db)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+
+        _db = db;
+    }
+
+    public Task Handle(DialogCreatedDomainEvent notification, CancellationToken cancellationToken) =>
+        UpdateIndex(notification.DialogId, cancellationToken);
+
+    public Task Handle(DialogUpdatedDomainEvent notification, CancellationToken cancellationToken) =>
+        UpdateIndex(notification.DialogId, cancellationToken);
+
+    private async Task UpdateIndex(Guid dialogId, CancellationToken cancellationToken)
+    {
+        using var _ = await Semaphore.LockAsync(dialogId, cancellationToken);
+        await _db.UpsertFreeTextSearchIndex(dialogId, cancellationToken);
+    }
+}

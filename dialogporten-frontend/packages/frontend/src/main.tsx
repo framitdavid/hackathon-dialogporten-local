@@ -1,0 +1,76 @@
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router';
+import './i18n/config.ts';
+import { RootProvider as AltinnRootProvider, type LanguageCode } from '@altinn/altinn-components';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
+import App from './App.tsx';
+import { AuthProvider } from './components/Login/AuthContext.tsx';
+import { QUERY_KEYS } from './constants/queryKeys.ts';
+import { LoggerContextProvider } from './contexts/LoggerContext.tsx';
+import { getPartyFromCookie } from './cookie.ts';
+import { FeatureFlagProvider, loadFeatureFlags } from './featureFlags/FeatureFlagsProvider.tsx';
+
+declare const __APP_VERSION__: string;
+console.info('App Version:', __APP_VERSION__);
+
+const urlParams = new URLSearchParams(window.location.search);
+const isEnableMocking = urlParams.get('mock') === 'true';
+
+async function enableMocking() {
+  if (import.meta.env.DEV) {
+    if (isEnableMocking) {
+      const { worker } = await import('./mocks/browser');
+      return worker.start();
+    }
+  }
+}
+
+async function loadFeatures() {
+  try {
+    if (window.location.pathname === '/logout') {
+      return {};
+    }
+    return await loadFeatureFlags();
+  } catch {
+    return {};
+  }
+}
+
+const element = document.getElementById('root');
+
+const RootProvider = ({ children }: { children: React.ReactNode }) => {
+  const { i18n } = useTranslation();
+  const languageCode = i18n.language as LanguageCode;
+
+  return <AltinnRootProvider languageCode={languageCode}>{children}</AltinnRootProvider>;
+};
+
+if (element) {
+  const root = ReactDOM.createRoot(element);
+  const queryClient = new QueryClient();
+  queryClient.setQueryData([QUERY_KEYS.ALTINN_COOKIE], getPartyFromCookie('AltinnPartyUuid') ?? '');
+
+  Promise.all([enableMocking(), loadFeatures()]).then(([_, initialFlags]) => {
+    root.render(
+      <React.StrictMode>
+        <LoggerContextProvider>
+          <QueryClientProvider client={queryClient}>
+            <BrowserRouter>
+              <FeatureFlagProvider initialFlags={isEnableMocking ? undefined : initialFlags}>
+                <AuthProvider>
+                  <RootProvider>
+                    <App />
+                  </RootProvider>
+                </AuthProvider>
+              </FeatureFlagProvider>
+            </BrowserRouter>
+          </QueryClientProvider>
+        </LoggerContextProvider>
+      </React.StrictMode>,
+    );
+  });
+} else {
+  console.error(`element with id "root" is not in DOM`);
+}

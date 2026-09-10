@@ -1,0 +1,60 @@
+import type { DialogLookupQuery } from 'bff-types-generated';
+import { useMemo } from 'react';
+import { usePartyGraph } from '../../api/hooks/usePartiesSelectors.ts';
+import { graphQLSDK } from '../../api/queries.ts';
+import { getAccessAMUILink } from '../../auth/url.ts';
+import { useAuthenticatedQuery } from '../../auth/useAuthenticatedQuery.ts';
+import { QUERY_KEYS } from '../../constants/queryKeys.ts';
+import { useFeatureFlag } from '../../featureFlags/useFeatureFlag.ts';
+
+interface UseDelegationOutput {
+  delegationHref?: string;
+}
+
+const getDelegationHref = (instanceUrn: string, resourceId: string, dialogId: string, partyUuid: string): string => {
+  const base = getAccessAMUILink();
+  const params = new URLSearchParams({
+    instanceUrn,
+    resourceId,
+    dialogId,
+    partyUuid,
+  });
+  return `${base}/poa-overview/instance?${params.toString()}`;
+};
+
+export const useDelegation = (dialogId?: string, party?: string, org?: string): UseDelegationOutput => {
+  const partyGraph = usePartyGraph();
+  const instanceRef = `urn:altinn:dialog-id:${dialogId}`;
+  const orgsNotReadyToDealWithDelegations = useFeatureFlag<string[]>('auth.orgsNotReadyToDealWithDelegations');
+  const { data, isSuccess } = useAuthenticatedQuery<DialogLookupQuery>({
+    queryKey: [QUERY_KEYS.DIALOG_DELEGATION_LOOKUP, dialogId],
+    staleTime: 600_000,
+    refetchInterval: 1_200_000,
+    refetchOnMount: false,
+    retry: 3,
+    queryFn: async () => graphQLSDK.dialogLookup({ instanceRef: instanceRef }),
+    enabled: !!dialogId,
+  });
+
+  const partyUuid = useMemo(() => {
+    return party ? partyGraph.partyByUrn.get(party)?.partyUuid : undefined;
+  }, [partyGraph, party]);
+
+  const isDelegable = data?.dialogLookup?.lookup?.serviceResource?.isDelegable
+    ? !orgsNotReadyToDealWithDelegations?.includes(org ?? '')
+    : false;
+
+  if (isSuccess && isDelegable) {
+    const instanceRef = data?.dialogLookup?.lookup?.instanceRef;
+    const serviceResourceId = data?.dialogLookup?.lookup?.serviceResource.id;
+    if (instanceRef && serviceResourceId && dialogId && partyUuid) {
+      return {
+        delegationHref: getDelegationHref(instanceRef, serviceResourceId, dialogId, partyUuid),
+      };
+    }
+  }
+
+  return {
+    delegationHref: undefined,
+  };
+};

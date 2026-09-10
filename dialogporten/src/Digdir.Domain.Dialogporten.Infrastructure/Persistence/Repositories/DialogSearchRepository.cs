@@ -1,0 +1,699 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using Dapper;
+using Digdir.Domain.Dialogporten.Application;
+using Digdir.Domain.Dialogporten.Application.Common.Pagination;
+using Digdir.Domain.Dialogporten.Application.Common.Pagination.Continuation;
+using Digdir.Domain.Dialogporten.Application.Common.Pagination.Order;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.SearchEndUserContext;
+using Digdir.Domain.Dialogporten.Domain.Actors;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Activities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Contents;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories.DialogSearch.Abstractions;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories.DialogSearch.EndUser;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Npgsql;
+
+namespace Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories;
+
+internal sealed class DialogSearchRepository : IDialogSearchRepository
+{
+    private readonly DialogDbContext _db;
+    private readonly NpgsqlDataSource _dataSource;
+    private readonly ISearchStrategySelector<EndUserSearchContext> _endUserSearchStrategySelector;
+    private readonly IOptionsSnapshot<InfrastructureSettings> _infrastructureSettings;
+    private readonly IOptionsSnapshot<ApplicationSettings> _applicationSettings;
+
+    public DialogSearchRepository(
+        DialogDbContext dbContext,
+        NpgsqlDataSource dataSource,
+        ISearchStrategySelector<EndUserSearchContext> endUserSearchStrategySelector,
+        IOptionsSnapshot<InfrastructureSettings> infrastructureSettings,
+        IOptionsSnapshot<ApplicationSettings> applicationSettings)
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(endUserSearchStrategySelector);
+        ArgumentNullException.ThrowIfNull(infrastructureSettings);
+        ArgumentNullException.ThrowIfNull(applicationSettings);
+
+        _db = dbContext;
+        _dataSource = dataSource;
+        _endUserSearchStrategySelector = endUserSearchStrategySelector;
+        _infrastructureSettings = infrastructureSettings;
+        _applicationSettings = applicationSettings;
+    }
+
+    public async Task UpsertFreeTextSearchIndex(Guid dialogId, CancellationToken cancellationToken)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = CreateUpsertFreeTextSearchIndexCommand(
+            connection,
+            dialogId,
+            _infrastructureSettings.Value.DialogSearch.UpsertCommandTimeoutSeconds);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    internal static NpgsqlCommand CreateUpsertFreeTextSearchIndexCommand(
+        NpgsqlConnection connection,
+        Guid dialogId,
+        int? commandTimeoutSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var command = new NpgsqlCommand(
+            @"SELECT search.""UpsertDialogSearchOne""(@p_dialog_id)",
+            connection);
+        if (commandTimeoutSeconds is > 0)
+        {
+            command.CommandTimeout = commandTimeoutSeconds.Value;
+        }
+        command.Parameters.AddWithValue("p_dialog_id", dialogId);
+        return command;
+    }
+
+    public async Task<int> SeedFullAsync(bool resetExisting, CancellationToken ct) =>
+        await _db.Database
+            .SqlQuery<int>($@"SELECT search.""SeedDialogSearchQueueFull""({resetExisting}) AS ""Value""")
+            .SingleAsync(ct);
+
+    public async Task<int> SeedSinceAsync(DateTimeOffset since, bool resetMatching, CancellationToken ct) =>
+        await _db.Database
+            .SqlQuery<int>($@"SELECT search.""SeedDialogSearchQueueSince""({since}, {resetMatching}) AS ""Value""")
+            .SingleAsync(ct);
+
+    public async Task<int> SeedStaleAsync(bool resetMatching, CancellationToken ct) =>
+        await _db.Database
+            .SqlQuery<int>($@"SELECT search.""SeedDialogSearchQueueStale""({resetMatching}) AS ""Value""")
+            .SingleAsync(ct);
+
+    public async Task<int> WorkBatchAsync(int batchSize, long workMemBytes, bool staleFirst, CancellationToken ct) =>
+        await _db.Database
+            .SqlQuery<int>(
+                $@"SELECT search.""RebuildDialogSearchOnce""({(staleFirst ? "stale_first" : "standard")}, {batchSize}, {workMemBytes}) AS ""Value""")
+            .SingleAsync(ct);
+
+    public async Task<DialogSearchReindexProgress> GetProgressAsync(CancellationToken ct) =>
+        await _db.Database
+            .SqlQuery<DialogSearchReindexProgress>(
+                $"""
+                 SELECT "Total", "Pending", "Processing", "Done"
+                 FROM search."DialogSearchRebuildProgress"
+                 """)
+            .SingleAsync(ct);
+
+    public async Task OptimizeIndexAsync(CancellationToken ct) =>
+        await _db.Database.ExecuteSqlAsync($@"VACUUM ANALYZE search.""DialogSearch""", ct);
+
+    public async Task<PaginatedList<DialogEntity>> GetDialogsAsServiceOwner(
+        GetDialogsQuery query,
+        string orgName,
+        CancellationToken cancellationToken)
+    {
+        if (query.Search is not null)
+        {
+            throw new InvalidOperationException("FTS search is not supported for service owner dialog queries");
+        }
+
+        var queryBuilder = new PostgresFormattableStringBuilder()
+            .Append(
+                $"""
+                SELECT *
+                FROM "Dialog" d
+                WHERE d."Org" = {orgName}
+                """)
+            .AppendManyFilter(query.Party, nameof(query.Party))
+            .AppendManyFilter(query.ServiceResource, nameof(query.ServiceResource))
+            .AppendManyFilter(query.ExtendedStatus, nameof(query.ExtendedStatus))
+            .AppendManyFilter(query.Status, "StatusId", "int")
+            .AppendIf(query.CreatedAfter is not null, $""" AND {query.CreatedAfter}::timestamptz <= d."CreatedAt" """)
+            .AppendIf(query.CreatedBefore is not null, $""" AND d."CreatedAt" <= {query.CreatedBefore}::timestamptz """)
+            .AppendIf(query.UpdatedAfter is not null, $""" AND {query.UpdatedAfter}::timestamptz <= d."UpdatedAt" """)
+            .AppendIf(query.UpdatedBefore is not null, $""" AND d."UpdatedAt" <= {query.UpdatedBefore}::timestamptz """)
+            .AppendIf(query.ContentUpdatedAfter is not null, $""" AND {query.ContentUpdatedAfter}::timestamptz <= d."ContentUpdatedAt" """)
+            .AppendIf(query.ContentUpdatedBefore is not null, $""" AND d."ContentUpdatedAt" <= {query.ContentUpdatedBefore}::timestamptz """)
+            .AppendIf(query.DueAfter is not null, $""" AND {query.DueAfter}::timestamptz <= d."DueAt" """)
+            .AppendIf(query.DueBefore is not null, $""" AND d."DueAt" <= {query.DueBefore}::timestamptz """)
+            .AppendIf(query.VisibleAfter is not null, $""" AND {query.VisibleAfter}::timestamptz <= d."VisibleFrom" """)
+            .AppendIf(query.VisibleBefore is not null, $""" AND d."VisibleFrom" <= {query.VisibleBefore}::timestamptz """)
+            .AppendIf(query.Deleted is not null, $""" AND d."Deleted" = {query.Deleted}::boolean """)
+            .AppendIf(query.ExternalReference is not null, $""" AND d."ExternalReference" = {query.ExternalReference}::text """)
+            .AppendIf(query.Process is not null, $""" AND d."Process" = {query.Process}::text """)
+            .AppendIf(query.ExcludeApiOnly is not null, $""" AND ({query.ExcludeApiOnly}::boolean = false OR {query.ExcludeApiOnly}::boolean = true AND d."IsApiOnly" = false) """)
+            .AppendIsContentSeenFilterCondition(query.IsContentSeen)
+            .AppendSystemLabelFilterCondition(query.SystemLabel)
+            .AppendServiceOwnerLabelFilterCondition(query.ServiceOwnerLabels)
+            .ApplyPaginationCondition(query.OrderBy!, query.ContinuationToken, alias: "d")
+            .ApplyPaginationOrder(query.OrderBy!, alias: "d")
+            .ApplyPaginationLimit(query.Limit);
+
+        // DO NOT use Include here, as it will use the custom SQL above which is
+        // much less efficient than querying further by the resulting dialogIds.
+        // We only get dialogs here, and will later query related data as
+        // needed based on the IDs.
+        var efQuery = _db.Dialogs
+            .FromSql(queryBuilder.ToFormattableString())
+            .IgnoreQueryFilters()
+            .AsNoTracking();
+
+        var dialogs = await efQuery.ToPaginatedListAsync(
+            query.OrderBy!,
+            query.ContinuationToken,
+            query.Limit,
+            applyOrder: true,
+            applyContinuationToken: false,
+            cancellationToken);
+
+        return dialogs;
+    }
+
+    public async Task<PaginatedList<DataDialogEndUserContextListItemDto>> SearchDialogEndUserContextsAsServiceOwner(
+        string orgName,
+        List<string> parties,
+        List<SystemLabel.Values>? systemLabels,
+        DateTimeOffset? contentUpdatedAfter,
+        IContinuationTokenSet? continuationToken,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var orderSet = OrderSet<SearchDialogEndUserContextOrderDefinition, DataDialogEndUserContextListItemDto>.Default;
+        var systemLabelValues = systemLabels?
+            .Select(x => (int)x)
+            .ToArray();
+
+        if (parties.Count == 0)
+        {
+            return new PaginatedList<DataDialogEndUserContextListItemDto>([], false, null, orderSet.GetOrderString());
+        }
+
+        var queryBuilder = new PostgresFormattableStringBuilder();
+        if (systemLabelValues is not null && systemLabelValues.Length != 0)
+        {
+            queryBuilder
+                .Append(
+                    $"""
+                     SELECT d."Id" AS "DialogId"
+                          , d."EndUserContextRevision"
+                          , d."ContentUpdatedAt"
+                          , COALESCE(sl_agg."SystemLabels", ARRAY[]::int[]) AS "SystemLabels"
+                     FROM (
+                         SELECT d."Id"
+                              , d."ContentUpdatedAt"
+                              , c."Id" AS "DialogEndUserContextId"
+                              , c."Revision" AS "EndUserContextRevision"
+                         FROM "Dialog" d
+                         INNER JOIN "DialogEndUserContext" c ON c."DialogId" = d."Id"
+                         INNER JOIN LATERAL (
+                             SELECT 1
+                             FROM "DialogEndUserContextSystemLabel" sl_filter
+                             WHERE sl_filter."DialogEndUserContextId" = c."Id"
+                               AND sl_filter."SystemLabelId" = ANY({systemLabelValues}::int[])
+                             LIMIT 1
+                         ) filter_check ON TRUE
+                         WHERE d."Org" = {orgName}
+                     """)
+                .AppendManyFilter(parties, "Party")
+                .AppendIf(contentUpdatedAfter is not null, $""" AND {contentUpdatedAfter}::timestamptz <= d."ContentUpdatedAt" """)
+                .ApplyPaginationCondition(orderSet, continuationToken, alias: "d")
+                .ApplyPaginationOrder(orderSet, alias: "d")
+                .ApplyPaginationLimit(limit)
+                .Append(
+                    """
+                        ) d
+                     LEFT JOIN LATERAL (
+                         SELECT ARRAY_AGG(sl."SystemLabelId" ORDER BY sl."SystemLabelId") AS "SystemLabels"
+                         FROM "DialogEndUserContextSystemLabel" sl
+                         WHERE sl."DialogEndUserContextId" = d."DialogEndUserContextId"
+                     ) sl_agg ON TRUE
+                    """)
+                .ApplyPaginationOrder(orderSet, alias: "d");
+        }
+        else
+        {
+            queryBuilder
+                .Append(
+                    $"""
+                     SELECT d."Id" AS "DialogId"
+                          , c."Revision" AS "EndUserContextRevision"
+                          , d."ContentUpdatedAt"
+                          , COALESCE(sl_agg."SystemLabels", ARRAY[]::int[]) AS "SystemLabels"
+                     FROM (
+                         SELECT d."Id", d."ContentUpdatedAt"
+                         FROM "Dialog" d
+                         WHERE d."Org" = {orgName}
+                     """)
+                .AppendManyFilter(parties, "Party")
+                .AppendIf(contentUpdatedAfter is not null, $""" AND {contentUpdatedAfter}::timestamptz <= d."ContentUpdatedAt" """)
+                .ApplyPaginationCondition(orderSet, continuationToken, alias: "d")
+                .ApplyPaginationOrder(orderSet, alias: "d")
+                .ApplyPaginationLimit(limit)
+                .Append(
+                    """
+                        ) d
+                     INNER JOIN "DialogEndUserContext" c ON c."DialogId" = d."Id"
+                     LEFT JOIN LATERAL (
+                         SELECT ARRAY_AGG(sl."SystemLabelId" ORDER BY sl."SystemLabelId") AS "SystemLabels"
+                         FROM "DialogEndUserContextSystemLabel" sl
+                         WHERE sl."DialogEndUserContextId" = c."Id"
+                     ) sl_agg ON TRUE
+                    """)
+                .ApplyPaginationOrder(orderSet, alias: "d");
+        }
+
+        var (query, parameters) = queryBuilder.ToDynamicParameters();
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(query, parameters, cancellationToken: cancellationToken);
+        var rawRows = await connection.QueryAsync<RawEndUserContextListItemRow>(command);
+
+        var items = rawRows
+            .Select(row => new DataDialogEndUserContextListItemDto(
+                row.DialogId,
+                row.EndUserContextRevision,
+                new DateTimeOffset(row.ContentUpdatedAt),
+                row.SystemLabels.ToList()))
+            .ToList();
+
+        var hasNextPage = items.Count > limit;
+        if (hasNextPage)
+        {
+            items = items.Take(limit).ToList();
+        }
+
+        var nextContinuationToken = hasNextPage ? orderSet.GetContinuationTokenFrom(items.Last()) : null;
+
+        return new PaginatedList<DataDialogEndUserContextListItemDto>(
+            items,
+            hasNextPage,
+            nextContinuationToken,
+            orderSet.GetOrderString());
+    }
+
+    [SuppressMessage("Style", "IDE0037:Use inferred member name")]
+    public async Task<PaginatedList<DialogEntity>> GetDialogsAsEndUser(
+        GetDialogsQuery query,
+        DialogSearchAuthorizationResult authorizedResources,
+        CancellationToken cancellationToken)
+    {
+        // The authorization result is expected to already be constrained by query.Party and
+        // query.ServiceResource. Strategies treat ResourcesByParties as the effective authorization
+        // scope and do not re-apply those query filters when building permission CTEs.
+        if (authorizedResources.HasNoAuthorizations)
+        {
+            return new PaginatedList<DialogEntity>([], false, null, query.OrderBy!.GetOrderString());
+        }
+
+        var context = new EndUserSearchContext(query, authorizedResources);
+        var strategy = _endUserSearchStrategySelector.Select(context);
+        return await GetDialogsAsEndUserInternal(strategy, context, cancellationToken);
+    }
+
+    private async Task<PaginatedList<DialogEntity>> GetDialogsAsEndUserInternal(
+        IQueryStrategy<EndUserSearchContext> strategy,
+        EndUserSearchContext context,
+        CancellationToken cancellationToken)
+    {
+        var queryBuilder = strategy.BuildSql(context);
+        var query = context.Query;
+
+        var efQuery = _db.Dialogs
+            .FromSql(queryBuilder.ToFormattableString())
+            .TagWith($"Strategy:{strategy.Name}")
+            .IgnoreQueryFilters()
+            .AsNoTracking();
+
+        // Every end-user search runs inside a transaction so we can pin session settings with SET LOCAL:
+        //   * plan_cache_mode = force_custom_plan (ALWAYS): the service-driven strategies pass the
+        //     authorized party set as a bound text[] parameter; only a custom plan (which inspects the
+        //     actual array) drives the recency-ordered ServiceResource index with the party set as a
+        //     filter. A GENERIC plan treats the array as opaque, picks the party-first index, and probes
+        //     once per party (tens of thousands of index searches) -> it times out. Verified on prod:
+        //     custom ~0.7s, generic > 60s. EF/Npgsql use custom plans by default (no auto-prepare); this
+        //     pins that requirement in code and is required independently of the timeout.
+        //   * statement_timeout (only when SearchStatementTimeoutSeconds > 0): caps the worst case (a
+        //     common term with no narrowing range whose GIN scan is unbounded; or a broad
+        //     service/party-driven search). On timeout PostgreSQL cancels the statement (SQLSTATE 57014),
+        //     surfaced as a "too broad" 422. Set the timeout to 0 to disable *only* the timeout, never the
+        //     custom-plan pinning.
+        // Built as one batched command (single round-trip) by concatenation (not interpolation) so EF
+        // doesn't flag it as raw-SQL injection; the value is a server-controlled integer (milliseconds)
+        // and SET does not accept bind parameters. (No retry execution strategy is configured, so an
+        // explicit transaction here is safe.)
+        var timeoutSeconds = _applicationSettings.Value.Limits.EndUserSearch.SearchStatementTimeoutSeconds;
+        var sessionSetupSql = "SET LOCAL plan_cache_mode = force_custom_plan";
+        if (timeoutSeconds > 0)
+        {
+            sessionSetupSql += "; SET LOCAL statement_timeout = "
+                + (timeoutSeconds * 1000).ToString(CultureInfo.InvariantCulture);
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await _db.Database.ExecuteSqlRawAsync(sessionSetupSql, cancellationToken);
+            var dialogs = await efQuery.ToPaginatedListAsync(
+                query.OrderBy!,
+                query.ContinuationToken,
+                query.Limit,
+                applyOrder: true,
+                applyContinuationToken: false,
+                cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return dialogs;
+        }
+        // Only a genuine server-side statement_timeout maps to "too broad". A client disconnect / request
+        // cancellation also surfaces as 57014 (Npgsql cancels the running statement), but there the caller
+        // has gone away and it must not be reported as a domain error — let it propagate.
+        catch (PostgresException ex)
+            when (ex.SqlState == PostgresErrorCodes.QueryCanceled && !cancellationToken.IsCancellationRequested)
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            throw new SearchTermTooBroadException(ex);
+        }
+    }
+
+
+    public async Task<Dictionary<Guid, int>> FetchGuiAttachmentCountByDialogId(
+        Guid[] dialogIds,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new
+        {
+            DialogIds = dialogIds
+        };
+
+        const string sql =
+            """
+            WITH TargetDialogs (DialogId) AS (
+                SELECT unnest(@DialogIds)
+            )
+            SELECT a."DialogId" AS Id
+                 , COUNT(a."Id") AS GuiAttachmentCount
+            FROM TargetDialogs td
+            INNER JOIN "Attachment" AS a ON a."DialogId" = td.DialogId
+            WHERE a."Discriminator" = 'DialogAttachment'
+              AND EXISTS (
+                SELECT 1
+                FROM "AttachmentUrl" AS au
+                WHERE au."AttachmentId" = a."Id"
+                  AND au."ConsumerTypeId" = 1 -- GUI
+              )
+            GROUP BY a."DialogId";
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
+        var result = await connection.QueryAsync<(Guid Id, int GuiAttachmentCount)>(command);
+        return result.ToDictionary(x => x.Id, x => x.GuiAttachmentCount);
+    }
+
+    public async Task<Dictionary<Guid, DataContentDto>> FetchContentByDialogId(
+        Guid[] dialogIds,
+        int userAuthLevel,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new
+        {
+            DialogIds = dialogIds
+        };
+
+        const string sql =
+            """
+            WITH TargetDialogs (DialogId) AS (
+                SELECT unnest(@DialogIds)
+            )
+            SELECT d."Id" AS dialogId
+                 , COALESCE(r."MinimumAuthenticationLevel", 0) AS authLevel
+                 , c."TypeId"
+                 , c."MediaType"
+                 , l."LanguageCode"
+                 , l."Value"
+            FROM TargetDialogs td
+            INNER JOIN "Dialog" d ON d."Id" = td.DialogId
+            LEFT JOIN "ResourcePolicyInformation" AS r ON d."ServiceResource" = r."Resource"
+            INNER JOIN "DialogContent" AS c ON c."DialogId" = d."Id"
+            INNER JOIN "DialogContentType" AS ct ON c."TypeId" = ct."Id" AND ct."OutputInList"
+            INNER JOIN "LocalizationSet" ls ON ls."Discriminator" = 'DialogContentValue' AND ls."DialogContentId" = c."Id"
+            INNER JOIN "Localization" l ON l."LocalizationSetId" = ls."Id"
+            ORDER BY l."LanguageCode"
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
+        var rawRows = await connection.QueryAsync<RawContentRow>(command);
+        return rawRows
+            .GroupBy(x => new { x.DialogId, x.AuthLevel })
+            .ToDictionary(x => x.Key.DialogId, row =>
+            {
+                var hasRequiredAuth = row.Key.AuthLevel <= userAuthLevel;
+                var contentValues = row
+                    .GroupBy(r => new { r.TypeId, r.MediaType })
+                    .Select(x => new DataContentValueDto(TypeId: x.Key.TypeId, MediaType: x.Key.MediaType, Value: x
+                        .Select(r => new DataLocalizationDto(r.LanguageCode, r.Value))
+                        .ToList()))
+                    .ToList();
+                return new DataContentDto(
+                    Title: PickByAuth(contentValues,
+                        sensitive: DialogContentType.Values.Title,
+                        nonSensitive: DialogContentType.Values.NonSensitiveTitle,
+                        hasRequiredAuth: hasRequiredAuth)!,
+                    Summary: PickByAuth(contentValues,
+                        sensitive: DialogContentType.Values.Summary,
+                        nonSensitive: DialogContentType.Values.NonSensitiveSummary,
+                        hasRequiredAuth: hasRequiredAuth),
+                    ExtendedStatus: contentValues.FirstOrDefault(x =>
+                        x.TypeId == DialogContentType.Values.ExtendedStatus),
+                    SenderName: contentValues.FirstOrDefault(x =>
+                        x.TypeId == DialogContentType.Values.SenderName));
+            });
+    }
+
+    public async Task<Dictionary<Guid, DataDialogEndUserContextDto>> FetchEndUserContextByDialogId(
+        Guid[] dialogIds,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new
+        {
+            DialogIds = dialogIds
+        };
+
+        const string sql =
+            """
+            WITH TargetDialogs (DialogId) AS (
+                SELECT unnest(@DialogIds)
+            )
+            SELECT c."DialogId"
+                 , c."Revision"
+                 , cl."SystemLabelId"
+            FROM TargetDialogs td
+            INNER JOIN "DialogEndUserContext" AS c ON c."DialogId" = td.DialogId
+            INNER JOIN "DialogEndUserContextSystemLabel" AS cl ON c."Id" = cl."DialogEndUserContextId";
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
+        var rawRows = await connection.QueryAsync<RawEndUserContextRow>(command);
+
+        return rawRows
+            .GroupBy(x => new { x.DialogId, x.Revision })
+            .ToDictionary(x => x.Key.DialogId, row => new DataDialogEndUserContextDto(
+                row.Key.Revision,
+                row.Select(x => x.SystemLabelId)
+                    .ToList()));
+    }
+
+    public async Task<Dictionary<Guid, List<DataDialogSeenLogDto>>> FetchSeenLogByDialogId(
+        Guid[] dialogIds,
+        string? currentUserId,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new
+        {
+            DialogIds = dialogIds,
+            CurrentUserId = currentUserId
+        };
+
+        const string sql =
+            """
+            WITH TargetDialogs (DialogId) AS (
+                SELECT unnest(@DialogIds)
+            )
+            SELECT sl."DialogId"
+                 , sl."Id" AS "SeenLogId"
+                 , sl."CreatedAt" AS "SeenAt"
+                 , sl."IsViaServiceOwner"
+                 , a."ActorTypeId" AS "ActorType"
+                 , an."ActorId"
+                 , an."Name" AS "ActorName"
+                 , COALESCE(an."ActorId" = @CurrentUserId, FALSE) AS "IsCurrentEndUser"
+            FROM TargetDialogs td
+            INNER JOIN "Dialog" d ON d."Id" = td.DialogId
+            INNER JOIN "DialogSeenLog" sl ON d."Id" = sl."DialogId"
+            INNER JOIN "Actor" a ON a."Discriminator" = 'DialogSeenLogSeenByActor' AND sl."Id" = a."DialogSeenLogId"
+            LEFT JOIN "ActorName" an ON a."ActorNameEntityId" = an."Id"
+            WHERE sl."CreatedAt" >= d."ContentUpdatedAt";
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+
+        var command = new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
+        var rawRows = await connection.QueryAsync<RawSeenLogRow>(command);
+
+        return rawRows
+            .GroupBy(x => x.DialogId)
+            .ToDictionary(x => x.Key, x => x.Select(row => new DataDialogSeenLogDto(
+                row.SeenLogId,
+                row.DialogId,
+                row.SeenAt,
+                row.IsViaServiceOwner,
+                row.IsCurrentEndUser,
+                new DataActorDto(row.ActorType,
+                    row.ActorId,
+                    row.ActorName)))
+            .ToList());
+    }
+
+    public async Task<Dictionary<Guid, DataDialogActivityDto>> FetchLatestActivitiesByDialogId(
+        Guid[] dialogIds,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new
+        {
+            DialogIds = dialogIds
+        };
+
+        const string sql =
+            """
+            SELECT la.*,
+                a."ActorTypeId" AS "ActorType",
+                an."ActorId",
+                an."Name" AS "ActorName",
+                loc."LanguageCode",
+                loc."Value" AS "Description"
+            FROM unnest(@DialogIds)
+            AS td(DialogId)
+            CROSS JOIN LATERAL (
+                SELECT da."DialogId", da."Id" AS "ActivityId", da."CreatedAt",
+                    da."TypeId", da."ExtendedType", da."TransmissionId"
+                FROM "DialogActivity" da
+                WHERE da."DialogId" = td.DialogId
+                ORDER BY da."CreatedAt" DESC, da."Id" DESC
+                LIMIT 1
+            ) la
+            INNER JOIN "Actor" a ON a."ActivityId" = la."ActivityId" 
+                AND a."Discriminator" = 'DialogActivityPerformedByActor'
+            LEFT JOIN "ActorName" an ON an."Id" = a."ActorNameEntityId"
+            LEFT JOIN LATERAL (
+                SELECT l."LanguageCode", l."Value"
+                FROM "LocalizationSet" ls
+                JOIN "Localization" l ON l."LocalizationSetId" = ls."Id"
+                WHERE ls."ActivityId" = la."ActivityId"
+                AND ls."Discriminator" = 'DialogActivityDescription'
+            ) loc ON TRUE;
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
+        var rawRows = await connection.QueryAsync<RawActivityRow>(command);
+
+        return rawRows
+            .GroupBy(x => x.DialogId)
+            .ToDictionary(x => x.Key, x => x
+                .GroupBy(y => y.ActivityId)
+                .Select(y =>
+                {
+                    var row = y.First();
+                    return new DataDialogActivityDto(
+                        row.ActivityId,
+                        row.CreatedAt,
+                        row.TypeId,
+                        Uri.TryCreate(row.ExtendedType, UriKind.RelativeOrAbsolute, out var extendedType)
+                            ? extendedType : null,
+                        row.TransmissionId,
+                        new DataActorDto(
+                            row.ActorType,
+                            row.ActorId,
+                            row.ActorName),
+                        y.Where(x => x.Description is not null && x.LanguageCode is not null)
+                            .Select(x => new DataLocalizationDto(x.LanguageCode!, x.Description!))
+                            .ToList()
+                    );
+                })
+                .Single()
+            );
+    }
+
+    public async Task<Dictionary<Guid, DataDialogServiceOwnerContextDto>> FetchServiceOwnerContextByDialogId(
+        Guid[] dialogIds,
+        CancellationToken cancellationToken)
+    {
+        var parameters = new
+        {
+            DialogIds = dialogIds
+        };
+
+        const string sql =
+            """
+            WITH TargetDialogs (DialogId) AS (
+                SELECT unnest(@DialogIds)
+            )
+            SELECT c."DialogId"
+                 , c."Revision"
+                 , l."Value"
+            FROM TargetDialogs td
+            INNER JOIN "DialogServiceOwnerContext" c ON c."DialogId" = td.DialogId
+            LEFT JOIN "DialogServiceOwnerLabel" l ON c."DialogId" = l."DialogServiceOwnerContextId";
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
+        var rawRows = await connection.QueryAsync<(Guid DialogId, Guid Revision, string? Value)>(command);
+
+        return rawRows
+            .GroupBy(x => new { x.DialogId, x.Revision })
+            .ToDictionary(x => x.Key.DialogId,
+                row => new DataDialogServiceOwnerContextDto(
+                    row.Key.Revision,
+                    row.Where(x => !string.IsNullOrEmpty(x.Value))
+                        .Select(x => x.Value!)
+                        .ToList()));
+    }
+
+    [SuppressMessage("Style", "IDE0072:Add missing cases")]
+    private static DataContentValueDto? PickByAuth(
+        List<DataContentValueDto> values,
+        DialogContentType.Values sensitive,
+        DialogContentType.Values nonSensitive,
+        bool hasRequiredAuth) => values
+        .Where(x => x.TypeId == sensitive || x.TypeId == nonSensitive)
+        .OrderBy(x => x.TypeId switch
+        {
+            _ when x.TypeId == sensitive && hasRequiredAuth => 0,
+            _ when x.TypeId == nonSensitive && !hasRequiredAuth => 1,
+            _ when x.TypeId == sensitive => 2,
+            _ => 3
+        })
+        .FirstOrDefault();
+
+    private sealed record RawContentRow(Guid DialogId, int AuthLevel, DialogContentType.Values TypeId, string MediaType,
+        string LanguageCode, string Value);
+    private sealed record RawEndUserContextRow(Guid DialogId, Guid Revision, SystemLabel.Values SystemLabelId);
+    private sealed class RawEndUserContextListItemRow
+    {
+        public Guid DialogId { get; set; }
+        public Guid EndUserContextRevision { get; set; }
+        public DateTime ContentUpdatedAt { get; set; }
+        public SystemLabel.Values[] SystemLabels { get; set; } = [];
+    }
+    private sealed record RawSeenLogRow(Guid DialogId, Guid SeenLogId, DateTime SeenAt, bool IsViaServiceOwner,
+        ActorType.Values ActorType, string? ActorId, string? ActorName, bool IsCurrentEndUser);
+    private sealed record RawActivityRow(Guid DialogId, Guid ActivityId, DateTime CreatedAt,
+        DialogActivityType.Values TypeId, string? ExtendedType, Guid? TransmissionId, ActorType.Values ActorType,
+        string? ActorId, string? ActorName, string? LanguageCode, string? Description);
+
+}

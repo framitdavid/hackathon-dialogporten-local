@@ -1,0 +1,86 @@
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Update;
+using Digdir.Domain.Dialogporten.WebApi.Common;
+using Digdir.Domain.Dialogporten.WebApi.Common.Authorization;
+using Digdir.Domain.Dialogporten.WebApi.Common.Extensions;
+using Digdir.Domain.Dialogporten.WebApi.Common.Swagger;
+using Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.Common.Extensions;
+using FastEndpoints;
+using MediatR;
+using Constants = Digdir.Domain.Dialogporten.WebApi.Common.Constants;
+
+namespace Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.ServiceOwner.Dialogs.Commands.Update;
+
+[OpenApiOperationId("UpdateDialog")]
+[OpenApiExtras(
+    scopes: [AuthorizationScope.ServiceProvider],
+    securitySchemes: [OpenApiSecurityScheme.MaskinportenSecurityScheme])
+]
+public sealed class UpdateDialogEndpoint : Endpoint<UpdateDialogRequest>
+{
+    private readonly ISender _sender;
+
+    public UpdateDialogEndpoint(ISender sender)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        _sender = sender;
+    }
+
+    public override void Configure()
+    {
+        Put("dialogs/{dialogId}");
+        Policies(AuthorizationPolicy.ServiceProvider);
+        Group<ServiceOwnerGroup>();
+
+        Description(b => b.ProducesOneOf(
+            StatusCodes.Status204NoContent,
+            StatusCodes.Status400BadRequest,
+            StatusCodes.Status404NotFound,
+            StatusCodes.Status409Conflict,
+            StatusCodes.Status410Gone,
+            StatusCodes.Status412PreconditionFailed,
+            StatusCodes.Status422UnprocessableEntity));
+    }
+
+    public override async Task HandleAsync(UpdateDialogRequest req, CancellationToken ct)
+    {
+        var command = new UpdateDialogCommand
+        {
+            Id = req.DialogId,
+            IfMatchDialogRevision = req.IfMatchDialogRevision,
+            Dto = req.Dto,
+            IsSilentUpdate = req.IsSilentUpdate ?? false,
+        };
+
+        var updateDialogResult = await _sender.Send(command, ct);
+        await updateDialogResult.Match(
+            success =>
+            {
+                HttpContext.Response.Headers.Append(Constants.ETag, success.Revision.ToString());
+                return Send.NoContentAsync(ct);
+            },
+            notFound => this.NotFoundAsync(notFound, ct),
+            gone => this.GoneAsync(gone, ct),
+            validationFailed => this.BadRequestAsync(validationFailed, ct),
+            forbidden => this.ForbiddenAsync(forbidden, ct),
+            domainError => this.UnprocessableEntityAsync(domainError, ct),
+            concurrencyError => this.PreconditionFailed(ct),
+            conflict => this.ConflictAsync(conflict, ct));
+    }
+}
+
+[OpenApiTypeName(nameof(UpdateDialogRequest))]
+public sealed class UpdateDialogRequest
+{
+    public Guid DialogId { get; set; }
+
+    [FromBody]
+    public UpdateDialogDto Dto { get; set; } = null!;
+
+    [FromHeader(headerName: Constants.IfMatch, isRequired: false, removeFromSchema: true)]
+    public Guid? IfMatchDialogRevision { get; set; }
+
+    [HideFromDocs]
+    public bool? IsSilentUpdate { get; init; }
+}

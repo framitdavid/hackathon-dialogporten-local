@@ -1,0 +1,100 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# See also Directory.Build.Props for additional analyzer settings
+
+root = true
+
+[*]
+# Enforce line endings to be LF
+end_of_line = lf
+# Enforce indentation to be 4 spaces
+indent_style = space
+indent_size = 4
+# Insert a final new line at the end of the file
+insert_final_newline = true
+
+[*.cs]
+# Attributes should be on a line above the item they are associated with
+place_attribute_on_same_line = false
+
+# CA1848: Use the LoggerMessage delegates
+# TODO: Possible performance improvement
+dotnet_diagnostic.CA1848.severity = none
+
+# Identifiers should not match keywords
+dotnet_diagnostic.CA1716.severity = none
+
+# Style faults should be warnings
+dotnet_analyzer_diagnostic.category-Style.severity = warning
+
+#
+dotnet_style_parentheses_in_arithmetic_binary_operators = always_for_clarity
+
+# Enforce file scoped namespaces
+csharp_style_namespace_declarations = file_scoped:suggestion
+# Place 'using' directives outside of namespaces
+csharp_using_directive_placement = outside_namespace
+
+# Disabling this because of https://github.com/dotnet/roslyn/issues/41640
+dotnet_diagnostic.IDE0005.severity = none
+
+# Disabling this because of https://github.com/dotnet/roslyn/issues/70826
+dotnet_diagnostic.IDE0028.severity = none
+
+# Primary constructors
+dotnet_diagnostic.IDE0290.severity = none
+
+# Unused private members
+dotnet_diagnostic.IDE0051.severity = none
+
+# Disable collection expression until Rider supports it
+dotnet_style_prefer_collection_expression = false;
+
+# Order 'using' directives with System.* appearing first
+dotnet_sort_system_directives_first = true
+# Suggest the use of var when the type is apparent
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+# Suggest using expression bodies
+csharp_style_expression_bodied_methods = when_on_single_line
+dotnet_diagnostic.IDE0022.severity = suggestion
+# Don't mix non-braces and braces for ifs
+csharp_prefer_braces = when_multiline
+
+# Don't prefer specifying types when using new() { ... }
+resharper_arrange_object_creation_when_type_not_evident_highlighting = none
+
+# "Expression body is never used"
+dotnet_diagnostic.IDE0058.severity = none
+# "'if' statement can be simplified"
+dotnet_diagnostic.IDE0046.severity = suggestion
+# "Do not declare static members on generic types"
+dotnet_diagnostic.CA1000.severity = none
+# "Instantiate argument exceptions correctly"
+dotnet_diagnostic.CA2208.severity = suggestion
+
+# Sonar false positive for C# 14 extension blocks
+dotnet_diagnostic.S2325.severity = none
+dotnet_diagnostic.S4136.severity = none
+dotnet_diagnostic.S8368.severity = none
+
+[*.yml]
+
+# Enforce indentation to be 2 spaces
+indent_size = 2
+
+[*.json]
+
+# Enforce indentation to be 2 spaces
+indent_size = 2
+
+[*.zsh]
+
+# Enforce indentation to be 2 spaces
+indent_size = 2
+
+# Verify snapshot files are generated, and Verify compares them byte-for-byte.
+# A final newline that the generator does not emit makes the snapshot mismatch.
+[*.verified.*]
+insert_final_newline = false

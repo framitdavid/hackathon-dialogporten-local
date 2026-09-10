@@ -1,0 +1,40 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build:bff-types-generated": {
+      "dependsOn": ["^build"],
+      "outputs": ["generated/**"],
+      "cache": false
+    },
+    "build:@altinn/dialogporten-node-logger": {
+      "dependsOn": ["^build"],
+      "outputs": ["packages/node-logger/dist/**"],
+      "cache": false
+    },
+    "prepare:@altinn/dialogporten-node-logger": {
+      "outputs": ["packages/node-logger/dist/**"],
+      "cache": false
+    },
+    "build": {
+      "env": ["BASEURL", "URL", "BUILD_VERSION", "ASTRO_TELEMETRY_DISABLED"],
+      "dependsOn": ["build:bff-types-generated", "prepare:@altinn/dialogporten-node-logger"],
+      "cache": false
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "test": {
+      "outputs": [],
+      "cache": false
+    },
+    "typecheck": {
+      "outputs": [],
+      "cache": false
+    },
+    "build:docker": {
+      "outputs": [],
+      "cache": false
+    }
+  }
+}

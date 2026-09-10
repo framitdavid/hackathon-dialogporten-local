@@ -1,0 +1,33 @@
+query GetDialogLookup($instanceRef: String!) {
+  dialogLookup(instanceRef: $instanceRef) {
+    lookup {
+      dialogId
+      instanceRef
+      party
+      title {
+        languageCode
+        value
+      }
+      serviceResource {
+        id
+      }
+      serviceOwner {
+        code
+      }
+      authorizationEvidence {
+        viaRole
+        viaAccessPackage
+        viaResourceDelegation
+        viaInstanceDelegation
+        evidence {
+          grantType
+          subject
+        }
+      }
+    }
+    errors {
+      __typename
+      message
+    }
+  }
+}

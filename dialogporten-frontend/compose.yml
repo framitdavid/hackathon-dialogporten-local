@@ -1,0 +1,320 @@
+services:
+  reverse-proxy:
+    container_name: reverse-proxy
+    image: traefik:v3.7.12
+    extra_hosts:
+      # Lar dynamic.yml rute local.altinn.cloud videre til LocalTest på verten.
+      - "host.docker.internal:host-gateway"
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/etc/traefik/dynamic.yml"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./certs:/etc/certs:ro
+      - ./dynamic.yml:/etc/traefik/dynamic.yml
+    networks:
+      default:
+        aliases:
+          # Lar BFF-containeren slå opp https://oidc-static.localhost internt.
+          # Oppslaget treffer Traefik, som terminerer TLS med sertifikatet som
+          # har dette navnet i SAN, og ruter videre på Host-header.
+          - oidc-static.localhost
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dashboard.localhost`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "homarr.relativeSubdomain=dashboard"
+      - "homarr.icon=simple-icons:traefikproxy"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`^.+$`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    environment:
+      PUID: 1000
+      PGID: 1000
+      HOMEPAGE_ALLOWED_HOSTS: "localhost,127.0.0.1"
+    volumes:
+      - ./data/homepage/config:/app/config
+      - ./data/homepage/icons:/app/public/icons
+      - ./var/run/docker.sock:/var/run/docker.sock:ro
+      - ./dynamic.yml:/etc/traefik/dynamic.yml
+      - ./certs:/etc/certs:ro
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homepage.rule=Host(`localhost`)"
+
+    ports:
+      - 3000:3000
+      - 3000:3000
+  # Statisk OIDC-discovery for helt lokal kjøring.
+  # BFF henter .well-known/openid-configuration ved oppstart (oidc.ts:165 og
+  # verifyToken.ts:107) og starter ikke hvis den feiler. Endepunktene i dokumentet
+  # kalles aldri så lenge sesjonen opprettes via /api/init-session.
+  oidc-static:
+    container_name: oidc-static
+    image: nginx:1.25-alpine
+    volumes:
+      - ./oidc-static/.well-known:/usr/share/nginx/html/.well-known:ro
+      - ./oidc-static/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.oidc-static.rule=Host(`oidc-static.localhost`)"
+      - "traefik.http.routers.oidc-static.tls=true"
+
+  redis:
+    container_name: redis
+    image: redis:6.2-alpine
+    restart: always
+    ports:
+      - 6379:6379
+    command: >
+      redis-server --save 20 1 --loglevel warning --requirepass mysecretpassword
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  # GUI for checking what's in Redis
+  redisinsight:
+    container_name: redisinsight
+    image: redis/redisinsight
+    environment:
+      RI_APP_PORT: 80
+      RI_APP_HOST: "0.0.0.0"
+    ports:
+      - 8080:80
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.redisinsight.rule=Host(`redisinsight.localhost`)"
+      - "traefik.http.services.redisinsight.loadbalancer.server.port=80"
+      - "homarr.relativeSubdomain=redisinsight"
+      - "homarr.icon=devicon-plain:redis-wordmark"
+    volumes:
+      - redisinsight_cache:/data
+
+  db:
+    container_name: db
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: dialogporten
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dialogporten"]
+      interval: 10s
+      timeout: 20s
+      retries: 5
+    ports:
+      - 5432:5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  pgadmin4:
+    container_name: pgadmin4
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pgadmin4.rule=Host(`pgadmin4.localhost`)"
+
+  bff:
+    container_name: bff
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+    build:
+      context: .
+      dockerfile: ./packages/bff/Dockerfile
+      target: build
+    environment:
+      DB_CONNECTION_STRING: postgres://postgres:mysecretpassword@db:5432/dialogporten
+      HOSTNAME: https://app.localhost
+      DIALOGPORTEN_URL: ${DIALOGPORTEN_URL}
+      PLATFORM_BASEURL: ${PLATFORM_BASEURL}
+      OIDC_PLATFORM_URL: ${OIDC_PLATFORM_URL}
+      OIDC_URL: ${OIDC_URL}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      ENABLE_GRAPHIQL: true
+      SESSION_SECRET: IDPortenSessionSecret2023MoreLettersBlaBla
+      REDIS_CONNECTION_STRING: redis://:mysecretpassword@redis:6379/0
+      PORT: 80
+      NODE_ENV: production
+      AUTH_CONTEXT_COOKIE_DOMAIN: ${AUTH_CONTEXT_COOKIE_DOMAIN}
+      # OpenTelemetry configuration (connect to Jaeger on host machine)
+      OTEL_NAMESPACE: ${OTEL_NAMESPACE}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES}
+      APP_CONFIG_CONNECTION_STRING: ${APP_CONFIG_CONNECTION_STRING}
+      ENABLE_INIT_SESSION_ENDPOINT: true
+      # Lokal innlogging uten ID-porten: /api/login lager sesjonen direkte for denne
+      # personen. Tom verdi gir vanlig OIDC-flyt.
+      LOCAL_DEV_PID: ${LOCAL_DEV_PID:-}
+      DISABLE_PROFILE: false
+      ALTINN2_BASE_URL: ${ALTINN2_BASE_URL}
+      ALTINN2_API_KEY: ${ALTINN2_API_KEY}
+      PERSON_URN_ENC_KEYS: ${PERSON_URN_ENC_KEYS}
+      MASKINPORTEN_CLIENT_ID: ${MASKINPORTEN_CLIENT_ID}
+      MASKINPORTEN_JWK: ${MASKINPORTEN_JWK}
+      MASKINPORTEN_ISSUER: ${MASKINPORTEN_ISSUER}
+      MASKINPORTEN_SCOPE: ${MASKINPORTEN_SCOPE}
+      OCP_APIM_SUBSCRIPTION_KEY: ${OCP_APIM_SUBSCRIPTION_KEY}
+      REGISTER_SUBSCRIPTION_KEY: ${REGISTER_SUBSCRIPTION_KEY}
+      # Node stoler ikke på mkcert-CA-en, og oppstartshentingen av .well-known går
+      # over HTTPS mot Traefik. Kopier mkcert sin rot-CA hit:
+      #   cp "$(mkcert -CAROOT)/rootCA.pem" certs/
+      # Alternativ hvis du ikke bruker mkcert: NODE_TLS_REJECT_UNAUTHORIZED=0
+      NODE_EXTRA_CA_CERTS: /etc/certs/rootCA.pem
+    volumes:
+      - ./certs:/etc/certs:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.bff.rule=Host(`app.localhost`) && PathPrefix(`/api`)"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "pnpm --filter bff run docker"
+    develop:
+      watch:
+        - action: sync
+          path: ./packages/bff/
+          target: /app/packages/bff/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+        - action: sync+restart
+          path: ./packages/bff-types-generated/
+          target: /app/packages/bff-types-generated/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+        - action: rebuild
+          path: ./packages/node-logger/
+          target: /app/packages/node-logger/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+        - action: sync+restart
+          path: ./packages/fastify-graphiql/
+          target: /app/packages/fastify-graphiql/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+        - action: rebuild
+          path: pnpm-lock.yaml
+          target: /app/pnpm-lock.yaml
+
+  bff-migration:
+    container_name: bff-migration
+    command: sh -c "pnpm --filter bff run docker"
+    build:
+      context: .
+      dockerfile: ./packages/bff/Dockerfile
+      target: build
+    environment:
+      DB_CONNECTION_STRING: postgres://postgres:mysecretpassword@db:5432/dialogporten
+      HOSTNAME: https://app.localhost
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      CLIENT_ID: ${CLIENT_ID}
+      CLIENT_SECRET: ${CLIENT_SECRET}
+      SESSION_SECRET: IDPortenSessionSecret2023MoreLettersBlaBla
+      REDIS_CONNECTION_STRING: redis://:mysecretpassword@redis:6379/0
+      TYPEORM_MIGRATIONS: src/migrations/*.ts
+      TYPEORM_MIGRATIONS_DIR: src/migrations
+      MIGRATION_RUN: true
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    container_name: frontend
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+      target: build
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`app.localhost`)"
+      - "traefik.http.services.myservice.loadbalancer.server.port=80"
+    develop:
+      watch:
+        - action: sync
+          path: ./packages/frontend/
+          target: /app/packages/frontend/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+            - test-results/
+            - playwright-report/
+            - blob-report/
+            - axe-reports/
+            - playwright/.cache/
+        - action: sync+restart
+          path: ./packages/bff-types-generated/
+          target: /app/packages/bff-types-generated/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+        - action: rebuild
+          path: pnpm-lock.yaml
+          target: /app/pnpm-lock.yaml
+  docs:
+    container_name: docs
+    volumes:
+      - ./certs:/etc/certs:ro
+      - ./dynamic.yml:/etc/traefik/dynamic.yml
+    build:
+      context: .
+      dockerfile: ./packages/docs/Dockerfile
+      target: build
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.docs.rule=Host(`docs.localhost`)"
+      - "traefik.enable=true"
+    develop:
+      watch:
+        - action: sync
+          path: ./packages/docs/
+          target: /app/packages/docs/
+          ignore:
+            - node_modules/
+            - .azure/
+            - .git/
+        - action: rebuild
+          path: pnpm-lock.yaml
+          target: /app/pnpm-lock.yaml
+
+volumes:
+  pgadmin_data:
+  postgres_data:
+  redisinsight_cache:
+    driver: local

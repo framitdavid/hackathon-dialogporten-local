@@ -1,0 +1,142 @@
+using System.Data;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Actors;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.Actors;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.EndUserContext.Commands.SetSystemLabels;
+
+public sealed class SetSystemLabelCommand : IRequest<SetSystemLabelResult>, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid DialogId { get; set; }
+    public string? EndUserId { get; set; } // See ServiceOwnerOnBehalfOfPersonMiddleware
+    public ActorDto? PerformedBy { get; set; }
+    public Guid? IfMatchEndUserContextRevision { get; set; }
+
+    public IReadOnlyCollection<SystemLabel.Values> AddLabels { get; set; } = [];
+    public IReadOnlyCollection<SystemLabel.Values> RemoveLabels { get; set; } = [];
+}
+
+public sealed record SetSystemLabelSuccess(Guid Revision);
+
+[GenerateOneOf]
+public sealed partial class SetSystemLabelResult : OneOfBase<SetSystemLabelSuccess, EntityNotFound, EntityDeleted, Forbidden, DomainError, ValidationError, ConcurrencyError, Conflict>;
+
+internal sealed class SetSystemLabelCommandHandler : IRequestHandler<SetSystemLabelCommand, SetSystemLabelResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IUserRegistry _userRegistry;
+    private readonly IUserResourceRegistry _userResourceRegistry;
+    private readonly IAltinnAuthorization _altinnAuthorization;
+
+    public SetSystemLabelCommandHandler(
+        IDialogDbContext db,
+        IUnitOfWork unitOfWork,
+        IUserRegistry userRegistry,
+        IUserResourceRegistry userResourceRegistry,
+        IAltinnAuthorization altinnAuthorization)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(userRegistry);
+        ArgumentNullException.ThrowIfNull(userResourceRegistry);
+        ArgumentNullException.ThrowIfNull(altinnAuthorization);
+
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _userRegistry = userRegistry;
+        _userResourceRegistry = userResourceRegistry;
+        _altinnAuthorization = altinnAuthorization;
+    }
+
+    public async Task<SetSystemLabelResult> Handle(
+        SetSystemLabelCommand request,
+        CancellationToken cancellationToken)
+    {
+        await _unitOfWork.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+
+        var isAdmin = _userResourceRegistry.IsCurrentUserServiceOwnerAdmin();
+        var org = isAdmin ? null : await _userResourceRegistry.GetCurrentUserOrgShortName(cancellationToken);
+        var dialog = await _db.Dialogs
+            .Include(x => x.EndUserContext)
+                .ThenInclude(x => x.DialogEndUserContextSystemLabels)
+            .Include(x => x.ServiceOwnerContext)
+                .ThenInclude(x => x.ServiceOwnerLabels)
+            .WhereIf(!isAdmin, x => x.Org == org)
+            .FirstOrDefaultAsync(x => x.Id == request.DialogId, cancellationToken: cancellationToken);
+
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.DialogId);
+        }
+
+        if (dialog.Deleted)
+        {
+            return new EntityDeleted<DialogEntity>(request.DialogId);
+        }
+
+        var (performedBy, forbidden) = await TryCreatePerformedByActor(request, cancellationToken);
+        if (forbidden is not null)
+        {
+            return forbidden;
+        }
+
+        if (!isAdmin)
+        {
+            // We have already checked that this org has access to the d ialog. Now check the end user:
+            if (!await _altinnAuthorization.HasListAuthorizationForDialog(dialog, cancellationToken: cancellationToken))
+            {
+                return new Forbidden().WithInvalidDialogIds([request.DialogId]);
+            }
+        }
+
+        if (request.IfMatchEndUserContextRevision is { } revision && revision != dialog.EndUserContext.Revision)
+        {
+            return new ConcurrencyError();
+        }
+
+        dialog.EndUserContext.UpdateSystemLabels(request.AddLabels, request.RemoveLabels, performedBy!);
+
+        var saveResult = await _unitOfWork
+                               .EnableConcurrencyCheck(dialog.EndUserContext, request.IfMatchEndUserContextRevision)
+                               .SaveChangesAsync(cancellationToken);
+
+        return saveResult.Match<SetSystemLabelResult>(
+            _ => new SetSystemLabelSuccess(dialog.EndUserContext.Revision),
+            domainError => domainError,
+            concurrencyError => concurrencyError,
+            conflict => conflict);
+    }
+
+    private async Task<(LabelAssignmentLogActor? Actor, Forbidden? Error)> TryCreatePerformedByActor(
+        SetSystemLabelCommand request,
+        CancellationToken cancellationToken)
+    {
+        if (request.PerformedBy is not null)
+        {
+            if (!_userResourceRegistry.IsCurrentUserServiceOwnerAdmin())
+            {
+                return (null, new Forbidden("performedBy is only allowed for admin-integrations."));
+            }
+
+            var actor = LabelAssignmentLogActorFactory.Create(
+                request.PerformedBy.ActorType,
+                request.PerformedBy.ActorId,
+                request.PerformedBy.ActorName);
+            return (actor, null);
+        }
+
+        var currentUserInformation = await _userRegistry.GetCurrentUserInformation(cancellationToken);
+        return (LabelAssignmentLogActorFactory.FromUserInformation(currentUserInformation), null);
+    }
+}

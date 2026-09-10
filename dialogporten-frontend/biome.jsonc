@@ -1,0 +1,89 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.4/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true,
+    "defaultBranch": "main"
+  },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "formatter": {
+    "formatWithErrors": true,
+    "enabled": true,
+    "lineWidth": 120,
+    "lineEnding": "lf",
+    "includes": ["**"],
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "javascript": {
+    "formatter": {
+      "arrowParentheses": "always",
+      "quoteStyle": "single",
+      "jsxQuoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all",
+      "quoteProperties": "asNeeded",
+      "bracketSpacing": true,
+      "bracketSameLine": false
+    }
+  },
+  "css": {
+    "parser": {
+      "cssModules": true
+    },
+    "formatter": {
+      "enabled": true,
+      "indentStyle": "space",
+      "indentWidth": 2
+    },
+    "linter": {
+      "enabled": true
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "suspicious": {
+        "noArrayIndexKey": "off",
+        "noConsole": { "level": "error", "options": { "allow": ["assert", "debug", "error", "info", "warn"] } }
+      },
+      "preset": "recommended",
+      "style": {
+        "noUnusedTemplateLiteral": "off",
+        "noNonNullAssertion": "off",
+        "useTemplate": "off"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "warn",
+        "useParseIntRadix": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["maintenance-page/index.html"],
+      "linter": {
+        "rules": {
+          "complexity": { "noImportantStyles": "off" },
+          "style": { "noDescendingSpecificity": "off" }
+        }
+      }
+    }
+  ],
+  "files": {
+    "includes": [
+      "**",
+      "!**/.azure",
+      "!**/.github",
+      "!**/node_modules",
+      "!**/generated",
+      "!**/dist",
+      "!**/build",
+      "!**/test-results",
+      "!**/mockServiceWorker.js",
+      "!**/*.svg",
+      "!package.json"
+    ]
+  }
+}

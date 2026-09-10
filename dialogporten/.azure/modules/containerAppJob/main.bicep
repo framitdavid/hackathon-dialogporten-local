@@ -1,0 +1,98 @@
+@description('The location where the resources will be deployed')
+param location string
+
+@description('The name of the job')
+param name string
+
+@description('The image to be used for the job')
+param image string
+
+@description('The ID of the container app environment')
+param containerAppEnvId string
+
+@description('The environment variables for the job')
+param environmentVariables { name: string, value: string?, secretRef: string? }[] = []
+
+@description('The secrets to be used in the job')
+param secrets { name: string, keyVaultUrl: string, identity: string }[] = []
+
+@description('The tags to be applied to the job')
+param tags object
+
+@description('CPU and memory resources for the container app')
+param resources object?
+
+@description('The cron expression for the job schedule (optional)')
+param cronExpression string = ''
+
+@description('The container args for the job (optional). Provide each argument as a separate array element.')
+param args string[] = []
+
+@description('The ID of the user-assigned managed identity')
+@minLength(1)
+param userAssignedIdentityId string
+
+@description('The replica timeout for the job in seconds')
+param replicaTimeOutInSeconds int
+
+@description('The workload profile to use for the job')
+param workloadProfileName string = 'Consumption'
+
+var isScheduled = !empty(cronExpression)
+
+var scheduledJobProperties = {
+  triggerType: 'Schedule'
+  scheduleTriggerConfig: {
+    cronExpression: cronExpression
+  }
+}
+
+var manualJobProperties = {
+  triggerType: 'Manual'
+  manualTriggerConfig: {
+    parallelism: 1
+    replicaCompletionCount: 1
+  }
+}
+
+resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: last(split(userAssignedIdentityId, '/'))
+}
+
+resource job 'Microsoft.App/jobs@2026-01-01' = {
+  name: name
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${userAssignedIdentityId}': {}
+    }
+  }
+  properties: {
+    configuration: union(
+      {
+        secrets: secrets
+        replicaRetryLimit: 1
+        replicaTimeout: replicaTimeOutInSeconds
+      },
+      isScheduled ? scheduledJobProperties : manualJobProperties
+    )
+    environmentId: containerAppEnvId
+    workloadProfileName: workloadProfileName
+    template: {
+      containers: [
+        {
+          env: environmentVariables
+          image: image
+          name: name
+          args: empty(args) ? null : args
+          resources: resources
+        }
+      ]
+    }
+  }
+  tags: tags
+}
+
+output identityPrincipalId string = managedIdentity.properties.principalId
+output name string = job.name

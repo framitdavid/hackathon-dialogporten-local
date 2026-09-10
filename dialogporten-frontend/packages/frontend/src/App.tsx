@@ -1,0 +1,58 @@
+import { Navigate, Route, Routes } from 'react-router';
+import { ErrorResetHandler, withErrorBoundary } from './components/ErrorBoundary/ErrorBoundary.tsx';
+import { ProtectedPageLayout } from './components/PageLayout/PageLayout.tsx';
+import { DialogDetailsPage } from './pages/DialogDetailsPage/DialogDetailsPage.tsx';
+import { ErrorPage } from './pages/Error/Error.tsx';
+import { Inbox } from './pages/Inbox/Inbox.tsx';
+import { FrontChannelLogout } from './pages/LogoutPage/FrontChannelLogout.tsx';
+import { NotificationsPage } from './pages/Profile/NotificationsPage/NotificationsPage.tsx';
+import { PartiesOverviewPage } from './pages/Profile/PartiesOverviewPage/PartiesOverviewPage.tsx';
+import { Profile } from './pages/Profile/Profile.tsx';
+import { RedirectPage } from './pages/RedirectPage/RedirectPage.tsx';
+import { PageRoutes } from './pages/routes.ts';
+import { SavedSearchesPage } from './pages/SavedSearches/SavedSearchesPage.tsx';
+import './app.css';
+import { usePageTracking } from './hooks/usePageTracking.ts';
+
+function App() {
+  // Add page tracking
+  usePageTracking();
+
+  return (
+    <div className="app">
+      <Routes>
+        <Route element={<ProtectedPageLayout />}>
+          <Route
+            path={PageRoutes.inbox}
+            element={withErrorBoundary(<Inbox key="inbox" viewType={'inbox'} />, 'Inbox')}
+          />
+          <Route path={PageRoutes.profile} element={withErrorBoundary(<Profile />, 'Profile')} />
+          <Route
+            path={PageRoutes.partiesOverview}
+            element={withErrorBoundary(<PartiesOverviewPage key="partys" />, 'Parties Overview')}
+          />
+          <Route path={PageRoutes.notifications} element={withErrorBoundary(<NotificationsPage />, 'Notifications')} />
+          <Route
+            path={PageRoutes.drafts}
+            element={withErrorBoundary(<Inbox key="draft" viewType={'drafts'} />, 'Drafts')}
+          />
+          <Route path={PageRoutes.sent} element={withErrorBoundary(<Inbox key="sent" viewType={'sent'} />, 'Sent')} />
+          <Route
+            path={PageRoutes.archive}
+            element={withErrorBoundary(<Inbox key="archive" viewType={'archive'} />, 'Archive')}
+          />
+          <Route path={PageRoutes.bin} element={withErrorBoundary(<Inbox key="bin" viewType={'bin'} />, 'Bin')} />
+          <Route path={PageRoutes.inboxItem} element={withErrorBoundary(<DialogDetailsPage />, 'Inbox Item')} />
+          <Route path={PageRoutes.savedSearches} element={withErrorBoundary(<SavedSearchesPage />, 'Saved Searches')} />
+          <Route path={PageRoutes.redirect} element={<RedirectPage />} />
+          <Route path={PageRoutes.error} element={<ErrorPage />} />
+          <Route path="*" element={<Navigate to="/" />} />
+        </Route>
+        <Route path="/logout" element={<FrontChannelLogout />} />
+      </Routes>
+      <ErrorResetHandler />
+    </div>
+  );
+}
+
+export default App;

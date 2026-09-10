@@ -1,0 +1,48 @@
+name: Run WebAPI E2E tests
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      ref:
+        description: "The branch or tag ref to run the tests on. Using default checkout ref if not provided."
+        required: false
+        default: ${{ github.ref }}
+        type: string
+    secrets:
+      TOKEN_GENERATOR_USERNAME:
+        required: true
+      TOKEN_GENERATOR_PASSWORD:
+        required: true
+
+jobs:
+  webapi-e2e-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: ./global.json
+
+      - name: Run WebAPI E2E tests
+        env:
+          DOTNET_ENVIRONMENT: ${{ inputs.environment }}
+          TokenGeneratorUser: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+          TokenGeneratorPassword: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+        run: |
+          dotnet test tests/Digdir.Domain.Dialogporten.WebAPI.E2E.Tests/Digdir.Domain.Dialogporten.WebAPI.E2E.Tests.csproj \
+            --configuration Release \
+            -- xUnit.Explicit=only

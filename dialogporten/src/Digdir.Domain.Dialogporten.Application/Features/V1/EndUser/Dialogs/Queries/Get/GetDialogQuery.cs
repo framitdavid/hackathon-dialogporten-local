@@ -1,0 +1,483 @@
+﻿#pragma warning disable CS0618 // Obsolete legacy authorization fields are mapped for backwards compatibility
+using System.Diagnostics;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Content;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Common;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.AuthorizationContexts;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+using static Digdir.Domain.Dialogporten.Application.Features.V1.Common.Authorization.Constants;
+using static Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Common.AuthorizationExclusion;
+using Constants = Digdir.Domain.Dialogporten.Application.Common.Authorization.Constants;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Get;
+
+public sealed class GetDialogQuery : IRequest<GetDialogResult>, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid DialogId { get; set; }
+    public List<AcceptedLanguage>? AcceptedLanguages { get; set; }
+}
+
+[GenerateOneOf]
+public sealed partial class GetDialogResult : OneOfBase<DialogDto, EntityNotFound, EntityNotVisible, EntityExpired, EntityDeleted, Forbidden>;
+
+internal sealed class GetDialogQueryHandler : IRequestHandler<GetDialogQuery, GetDialogResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IClock _clock;
+    private readonly IUserRegistry _userRegistry;
+    private readonly IAltinnAuthorization _altinnAuthorization;
+    private readonly IDialogTokenGenerator _dialogTokenGenerator;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IDialogSeenLogWriter _dialogSeenLogWriter;
+
+    public GetDialogQueryHandler(
+        IDialogDbContext db,
+        IUnitOfWork unitOfWork,
+        IClock clock,
+        IUserRegistry userRegistry,
+        IAltinnAuthorization altinnAuthorization,
+        IDialogTokenGenerator dialogTokenGenerator,
+        IDialogSeenLogWriter dialogSeenLogWriter)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(userRegistry);
+        ArgumentNullException.ThrowIfNull(altinnAuthorization);
+        ArgumentNullException.ThrowIfNull(dialogTokenGenerator);
+        ArgumentNullException.ThrowIfNull(dialogSeenLogWriter);
+
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _clock = clock;
+        _userRegistry = userRegistry;
+        _altinnAuthorization = altinnAuthorization;
+        _dialogTokenGenerator = dialogTokenGenerator;
+        _dialogSeenLogWriter = dialogSeenLogWriter;
+    }
+
+    public async Task<GetDialogResult> Handle(GetDialogQuery request, CancellationToken cancellationToken)
+    {
+        // This query could be written without all the includes as ProjectTo will do the job for us.
+        // However, we need to guarantee an order for sub resources of the dialog aggregate.
+        // This is to ensure that the get is consistent, and that PATCH in the API presentation
+        // layer behaviours in an expected manner. Therefore, we need to be a bit more verbose about it.
+        //
+        // Earlier one EF query was used. AsSingleQuery this was very slow for complex dialogs. The generated
+        // code with AsSplitQuery had a lot of redundant joins. Currently the splitting is done manually.
+        // Most of the new queries are using AsSingleQuery, but some of them still need to be split with AsSplitQuery
+        // based on measured duration and inspection of generated code.
+        var dialog = await _db.WrapWithRepeatableRead(async (dbCtx, ct) =>
+        {
+
+            var basicDialog = await dbCtx.Dialogs
+                .IgnoreQueryFilters()
+                .FirstOrDefaultAsync(x => x.Id == request.DialogId, cancellationToken: ct);
+            if (basicDialog == null)
+            {
+                return null;
+            }
+
+            var content = await dbCtx.DialogContents
+                .Where(x => x.DialogId == request.DialogId)
+                .Include(x => x.Value.Localizations.OrderBy(x => x.LanguageCode))
+                .IgnoreQueryFilters()
+                .AsSingleQuery()
+                .ToListAsync(cancellationToken: ct);
+
+            var attachments = await dbCtx.DialogAttachments
+                .Where(x => x.DialogId == request.DialogId)
+                .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
+                .Include(x => x.Urls.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                .Include(x => x.DisplayName!.Localizations.OrderBy(x => x.LanguageCode))
+                .Include(x => x.AuthorizationContext)
+                .IgnoreQueryFilters()
+                .AsSingleQuery()
+                .ToListAsync(cancellationToken: ct);
+
+            var guiActions = await dbCtx.DialogGuiActions
+                .Where(x => x.DialogId == request.DialogId)
+                .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
+                .Include(x => x.Title!.Localizations.OrderBy(x => x.LanguageCode))
+                .Include(x => x.Prompt!.Localizations.OrderBy(x => x.LanguageCode))
+                .Include(x => x.AuthorizationContext)
+                .IgnoreQueryFilters()
+                .ToListAsync(cancellationToken: ct);
+
+            var apiActions = await dbCtx.DialogApiActions
+                .Where(x => x.DialogId == request.DialogId)
+                .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
+                .Include(x => x.Endpoints.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                .Include(x => x.AuthorizationContext)
+                .IgnoreQueryFilters()
+                .ToListAsync(cancellationToken: ct);
+
+            var transmissions = await dbCtx.DialogTransmissions
+                .Where(x => x.DialogId == request.DialogId)
+                .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id)
+                .Include(x => x.Content.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                    .ThenInclude(x => x.Value.Localizations.OrderBy(x => x.LanguageCode))
+                .Include(x => x.Sender)
+                    .ThenInclude(x => x.ActorNameEntity)
+                .Include(x => x.Attachments.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                    .ThenInclude(x => x.Urls.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                .Include(x => x.Attachments.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                    .ThenInclude(x => x.DisplayName!.Localizations.OrderBy(x => x.LanguageCode))
+                .Include(x => x.NavigationalActions.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                    .ThenInclude(x => x.Title.Localizations.OrderBy(x => x.LanguageCode))
+                .Include(x => x.AuthorizationContext)
+                .Include(x => x.Attachments.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                    .ThenInclude(x => x.AuthorizationContext)
+                .Include(x => x.NavigationalActions.OrderBy(x => x.CreatedAt).ThenBy(x => x.Id))
+                    .ThenInclude(x => x.AuthorizationContext)
+                .IgnoreQueryFilters()
+                .ToListAsync(cancellationToken: ct);
+
+            var activities = await dbCtx.DialogActivities
+                .Where(x => x.DialogId == request.DialogId)
+                .Include(x => x.Description!.Localizations)
+                .Include(x => x.PerformedBy)
+                    .ThenInclude(x => x.ActorNameEntity)
+                .IgnoreQueryFilters()
+                .AsSingleQuery()
+                .ToListAsync(cancellationToken: ct);
+
+            var seenLog = await dbCtx.DialogSeenLog
+                .Where(x => x.DialogId == request.DialogId && x.CreatedAt >= basicDialog.ContentUpdatedAt)
+                .OrderBy(x => x.CreatedAt)
+                .Include(x => x.SeenBy)
+                    .ThenInclude(x => x.ActorNameEntity)
+                .IgnoreQueryFilters()
+                .AsSingleQuery()
+                .ToListAsync(cancellationToken: ct);
+
+            var endUserContext = await dbCtx.DialogEndUserContexts
+                .Where(x => x.DialogId == request.DialogId)
+                .Include(x => x.DialogEndUserContextSystemLabels)
+                .IgnoreQueryFilters()
+                .AsSingleQuery()
+                .FirstAsync(cancellationToken: ct);
+
+            var serviceOwnerContext = await dbCtx.DialogServiceOwnerContexts
+                .Where(x => x.DialogId == request.DialogId)
+                .Include(x => x.ServiceOwnerLabels)
+                .IgnoreQueryFilters()
+                .AsSingleQuery()
+                .FirstAsync(cancellationToken: ct);
+
+            basicDialog.Content = content;
+            basicDialog.Attachments = attachments;
+            basicDialog.GuiActions = guiActions;
+            basicDialog.ApiActions = apiActions;
+            basicDialog.Transmissions = transmissions;
+            basicDialog.Activities = activities;
+            basicDialog.SeenLog = seenLog;
+            basicDialog.EndUserContext = endUserContext;
+            basicDialog.ServiceOwnerContext = serviceOwnerContext;
+
+            return basicDialog;
+        }, cancellationToken);
+
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.DialogId);
+        }
+
+        var authorizationResult = await _altinnAuthorization.GetDialogDetailsAuthorization(
+            dialog,
+            cancellationToken: cancellationToken);
+
+        if (!authorizationResult.HasAccessToMainResource())
+        {
+            // If the user for some reason does not have access to the main resource, which might be
+            // because they are granted access to XACML-actions besides "read" not explicitly defined in the dialog,
+            // we do a recheck if the user has access to the dialog via the list authorization. If this is the case,
+            // we return the dialog and let DecorateWithAuthorization flag the actions as unauthorized. Note that
+            // there might be transmissions that the user has access to, even though there are no authorized actions.
+            var listAuthorizationResult = await _altinnAuthorization.HasListAuthorizationForDialog(
+                dialog,
+                cancellationToken: cancellationToken);
+
+            if (!listAuthorizationResult)
+            {
+                return new Forbidden("Forbidden");
+            }
+        }
+
+        if (dialog.Deleted)
+        {
+            return new EntityDeleted<DialogEntity>(request.DialogId);
+        }
+
+        if (!await _altinnAuthorization.UserHasRequiredAuthLevel(dialog.ServiceResource, cancellationToken))
+        {
+            return new Forbidden(Constants.AltinnAuthLevelTooLow);
+        }
+
+        if (dialog.VisibleFrom.HasValue && dialog.VisibleFrom > _clock.UtcNowOffset)
+        {
+            return new EntityNotVisible<DialogEntity>(dialog.VisibleFrom.Value);
+        }
+
+        if (dialog.ExpiresAt.HasValue && dialog.ExpiresAt < _clock.UtcNowOffset)
+        {
+            return new EntityExpired<DialogEntity>(dialog.ExpiresAt.Value);
+        }
+
+        var userId = _userRegistry.GetCurrentUserId();
+
+        var seenResult = await _dialogSeenLogWriter.OnSeen(dialog, userId, cancellationToken);
+
+        if (seenResult != null)
+        {
+            var newSeenLog = seenResult.NewSeenLog;
+            if (seenResult.CausedChangesOutsideEf) dialog.AddUpdateEvent();
+            if (newSeenLog != null) dialog.AddSeenEvent(userId.ExternalIdWithPrefix, userId.Type, newSeenLog.Id);
+        }
+
+        var saveResult = await _unitOfWork
+            .DisableAggregateFilter()
+            .DisableUpdatableFilter()
+            .DisableVersionableFilter()
+            .SaveChangesAsync(cancellationToken);
+
+        saveResult.Switch(
+            success => { },
+            domainError => throw new UnreachableException("Should not get domain error when updating SeenAt."),
+            concurrencyError =>
+                throw new UnreachableException("Should not get concurrencyError when updating SeenAt."),
+            conflict => throw new UnreachableException("Should not get conflict when updating SeenAt."));
+
+
+        dialog.FilterDialogLocalizations(request.AcceptedLanguages);
+
+        var dialogDto = dialog.ToDto();
+
+        dialogDto.SeenSinceLastUpdate = GetSeenLogs(
+            dialog.SeenLog,
+            dialog.UpdatedAt,
+            userId.ExternalIdWithPrefix,
+            seenResult?.NewSeenLog
+        );
+
+        dialogDto.SeenSinceLastContentUpdate = GetSeenLogs(
+            dialog.SeenLog,
+            dialog.ContentUpdatedAt,
+            userId.ExternalIdWithPrefix,
+            seenResult?.NewSeenLog
+        );
+
+        var authorizedContextReferences = DecorateWithAuthorization(dialog, dialogDto, authorizationResult);
+
+        dialogDto.DialogToken = _dialogTokenGenerator.GetDialogToken(
+            dialog,
+            authorizationResult,
+            authorizedContextReferences,
+            DialogTokenIssuerVersion
+        );
+
+        ApplyExclusion(dialog, dialogDto);
+        ReplaceUnauthorizedUrls(dialogDto);
+        ReplaceExpiredAttachmentUrls(dialogDto);
+
+        dialogDto.IsContentSeen = seenResult?.IsContentSeen ?? dialogDto.IsContentSeen;
+        dialogDto.EndUserContext.SystemLabels.Remove(SystemLabel.Values.MarkedAsUnopened);
+
+        return dialogDto;
+    }
+
+    private static List<DialogSeenLogDto> GetSeenLogs(
+        IEnumerable<DialogSeenLog> seenLogs,
+        DateTimeOffset filterDate,
+        string externalId,
+        DialogSeenLog? newSeenLog) =>
+        seenLogs
+            .Where(log => log.CreatedAt >= filterDate)
+            .Concat(newSeenLog is null ? [] : [newSeenLog])
+            .GroupBy(log => log.SeenBy.ActorNameEntity!.ActorId)
+            .Select(group => group
+                .OrderByDescending(log => log.CreatedAt)
+                .First()
+            )
+            .Select(log => ToSeenLogDto(externalId, log))
+            .ToList();
+
+    private static DialogSeenLogDto ToSeenLogDto(string externalId, DialogSeenLog log)
+    {
+        var actorId = log.SeenBy.ActorNameEntity?.ActorId;
+        var logDto = log.ToDto();
+        logDto.IsCurrentEndUser = externalId == actorId;
+        return logDto;
+    }
+
+    // Authorization is evaluated against the domain entities (which carry the authorization contexts);
+    // the DTO lists are mapped 1:1 in order from the entity lists, so pairwise zipping is safe.
+    // Returns the dialog token's authorized entity references: for every context-carrying entity the user is
+    // authorized for, the context's token reference or the entity's id. The dialog token's action claim stays
+    // frozen at legacy semantics; context grants are expressed exclusively through these references.
+    private static List<string> DecorateWithAuthorization(DialogEntity dialog, DialogDto dto,
+        DialogDetailsAuthorizationResult authorization)
+    {
+        var authorizedContextReferences = new List<string>();
+
+        foreach (var (a, apiAction) in dto.ApiActions.Zip(dialog.ApiActions))
+        {
+            a.IsAuthorized = authorization.HasAccess(apiAction, apiAction.GetAuthorizationCheck(dialog));
+            authorizedContextReferences.AddIfAuthorized(apiAction, a.IsAuthorized);
+        }
+
+        foreach (var (g, guiAction) in dto.GuiActions.Zip(dialog.GuiActions))
+        {
+            g.IsAuthorized = authorization.HasAccess(guiAction, guiAction.GetAuthorizationCheck(dialog));
+            authorizedContextReferences.AddIfAuthorized(guiAction, g.IsAuthorized);
+        }
+
+        dto.Content.MainContentReference?.IsAuthorized = authorization.HasReadAccessToMainResource();
+
+        foreach (var (a, attachment) in dto.Attachments.Zip(dialog.Attachments))
+        {
+            a.IsAuthorized = authorization.HasAccess(attachment, attachment.GetAuthorizationCheck(dialog));
+            authorizedContextReferences.AddIfAuthorized(attachment, a.IsAuthorized);
+        }
+
+        foreach (var (t, transmission) in dto.Transmissions.Zip(dialog.Transmissions))
+        {
+            t.IsAuthorized = authorization.HasAccess(transmission, transmission.GetAuthorizationCheck(dialog));
+            authorizedContextReferences.AddIfAuthorized(transmission, t.IsAuthorized);
+
+            // Parent-first narrowing: transmission access is a precondition for its attachments and
+            // navigational actions; a child context can only further restrict access.
+            foreach (var (a, attachment) in t.Attachments.Zip(transmission.Attachments))
+            {
+                a.IsAuthorized = authorization.HasAccess(attachment, t.IsAuthorized, attachment.GetAuthorizationCheck(dialog));
+                authorizedContextReferences.AddIfAuthorized(attachment, a.IsAuthorized);
+            }
+
+            foreach (var (n, navigationalAction) in t.NavigationalActions.Zip(transmission.NavigationalActions))
+            {
+                n.IsAuthorized = authorization.HasAccess(navigationalAction, t.IsAuthorized, navigationalAction.GetAuthorizationCheck(dialog));
+                authorizedContextReferences.AddIfAuthorized(navigationalAction, n.IsAuthorized);
+            }
+        }
+
+        return authorizedContextReferences;
+    }
+
+    // Entities whose authorization context asks for unauthorizedPresentation = excluded are removed from
+    // the collection they belong to when the user is not authorized, and recorded in the sibling "excluded"
+    // list as id and creation time only. Excluding a transmission takes its children with it.
+    private static void ApplyExclusion(DialogEntity dialog, DialogDto dto)
+    {
+        (dto.ApiActions, dto.ExcludedApiActions) =
+            PartitionExcluded(dto.ApiActions, dialog.ApiActions, x => x.IsAuthorized);
+        (dto.GuiActions, dto.ExcludedGuiActions) =
+            PartitionExcluded(dto.GuiActions, dialog.GuiActions, x => x.IsAuthorized);
+        (dto.Attachments, dto.ExcludedAttachments) =
+            PartitionExcluded(dto.Attachments, dialog.Attachments, x => x.IsAuthorized);
+
+        foreach (var (t, transmission) in dto.Transmissions.Zip(dialog.Transmissions))
+        {
+            (t.Attachments, t.ExcludedAttachments) =
+                PartitionExcluded(t.Attachments, transmission.Attachments, x => x.IsAuthorized);
+            (t.NavigationalActions, t.ExcludedNavigationalActions) =
+                PartitionExcluded(t.NavigationalActions, transmission.NavigationalActions, x => x.IsAuthorized);
+        }
+
+        // Last, so the loop above can still pair transmission DTOs with their entities by position.
+        (dto.Transmissions, dto.ExcludedTransmissions) =
+            PartitionExcluded(dto.Transmissions, dialog.Transmissions, x => x.IsAuthorized);
+    }
+
+    private static void ReplaceUnauthorizedUrls(DialogDto dto)
+    {
+        // For all API and GUI actions and transmissions where isAuthorized is false, replace the URLs with Constants.UnauthorizedUrl
+        foreach (var guiAction in dto.GuiActions.Where(a => !a.IsAuthorized))
+        {
+            guiAction.Url = Constants.UnauthorizedUri;
+        }
+
+        foreach (var apiAction in dto.ApiActions.Where(a => !a.IsAuthorized))
+        {
+            foreach (var endpoint in apiAction.Endpoints)
+            {
+                endpoint.Url = Constants.UnauthorizedUri;
+            }
+        }
+
+        if (dto.Content.MainContentReference?.IsAuthorized == false)
+        {
+            dto.Content.MainContentReference.ReplaceUnauthorizedContentReference();
+        }
+
+        foreach (var url in dto.Attachments.Where(a => !a.IsAuthorized).SelectMany(a => a.Urls))
+        {
+            url.Url = Constants.UnauthorizedUri;
+        }
+
+        foreach (var dialogTransmission in dto.Transmissions.Where(e => !e.IsAuthorized))
+        {
+            dialogTransmission.Content?.ContentReference.ReplaceUnauthorizedContentReference();
+        }
+
+        // Covers both children of unauthorized transmissions (never individually authorized) and
+        // individually unauthorized children within authorized transmissions.
+        foreach (var dialogTransmission in dto.Transmissions)
+        {
+            foreach (var url in dialogTransmission.Attachments.Where(a => !a.IsAuthorized).SelectMany(a => a.Urls))
+            {
+                url.Url = Constants.UnauthorizedUri;
+            }
+
+            foreach (var action in dialogTransmission.NavigationalActions.Where(a => !a.IsAuthorized))
+            {
+                action.Url = Constants.UnauthorizedUri;
+            }
+        }
+    }
+
+    private void ReplaceExpiredAttachmentUrls(DialogDto dto)
+    {
+        var expiredDialogAttachmentUrls = dto.Attachments
+            .Where(x => x.IsAuthorized)
+            .Where(x => x.ExpiresAt < _clock.UtcNowOffset)
+            .SelectMany(x => x.Urls);
+
+        foreach (var url in expiredDialogAttachmentUrls)
+        {
+            url.Url = Constants.ExpiredUri;
+        }
+
+        var expiredTransmissionAttachmentUrls = dto.Transmissions
+            .Where(x => x.IsAuthorized)
+            .SelectMany(x => x.Attachments)
+            .Where(x => x.IsAuthorized)
+            .Where(x => x.ExpiresAt < _clock.UtcNowOffset)
+            .SelectMany(x => x.Urls);
+
+        foreach (var url in expiredTransmissionAttachmentUrls)
+        {
+            url.Url = Constants.ExpiredUri;
+        }
+
+        var expiredTransmissionNavigationalActions = dto.Transmissions
+            .Where(x => x.IsAuthorized)
+            .SelectMany(x => x.NavigationalActions)
+            .Where(x => x.IsAuthorized)
+            .Where(x => x.ExpiresAt < _clock.UtcNowOffset);
+
+        foreach (var action in expiredTransmissionNavigationalActions)
+        {
+            action.Url = Constants.ExpiredUri;
+        }
+    }
+}

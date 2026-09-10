@@ -1,0 +1,504 @@
+import {
+  Button,
+  ContextMenu,
+  type ContextMenuProps,
+  type DialogListGroupProps,
+  type DialogListItemProps,
+  type FilterState,
+  ItemSelect,
+} from '@altinn/altinn-components';
+import { CheckmarkIcon, InformationSquareIcon } from '@navikt/aksel-icons';
+import { SystemLabel } from 'bff-types-generated';
+import type { TFunction } from 'i18next';
+import type { ReactNode } from 'react';
+import { useCallback, useMemo } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+import { Link, type LinkProps, useSearchParams } from 'react-router';
+import { MAX_COUNT_BULK_DIALOGS } from '../../api/hooks/useBulkActions.ts';
+import type { InboxViewType } from '../../api/hooks/useDialogs.tsx';
+import { QUERY_KEYS } from '../../constants/queryKeys.ts';
+import { useFormat } from '../../i18n/useDateFnsLocale.tsx';
+import { useGlobalState } from '../../useGlobalState.ts';
+import { useDialogActions } from '../DialogDetailsPage/useDialogActions.tsx';
+import { getDueAtProps } from './dueAt.ts';
+import type { CurrentSeenByLog } from './Inbox.tsx';
+import type { InboxItemInput } from './InboxItemInput.ts';
+import type { PartyGroup } from './queryParams.ts';
+import { getDialogStatus } from './status.ts';
+
+interface GroupedItem {
+  id: string | number;
+  title?: string;
+  description?: string;
+  items: InboxItemInput[];
+  orderIndex: number | null;
+}
+
+interface DialogListGroupPropsSort extends DialogListGroupProps {
+  orderIndex?: number | null;
+}
+
+type FilterScope = 'DEFAULT' | 'ARCHIVE' | 'BIN' | 'ALL';
+
+interface UseGroupedDialogsOutput {
+  groupedDialogs: DialogListItemProps[];
+  groups: Record<string, DialogListGroupPropsSort>;
+  title?: string;
+  description?: ReactNode;
+}
+
+interface UseGroupedDialogsProps {
+  items: InboxItemInput[];
+  viewType: InboxViewType;
+  /* There are more dialogs */
+  hasNextPage: boolean;
+  isLoading: boolean;
+  filters?: FilterState;
+  filterState?: FilterState;
+  onFiltersChange?: (filters: FilterState) => void;
+  isFetchingNextPage?: boolean;
+  applicablePartyCount: number;
+  /* true if the search results are displayed */
+  displaySearchResults?: boolean;
+  /* used to open modal with seen by log */
+  onSeenByLogModalChange: (input: CurrentSeenByLog) => void;
+  onAccessInfoModalChange: (input: { dialogId: string; title: string }) => void;
+}
+
+const SCOPE_TO_SYSTEM_LABEL: Record<Exclude<FilterScope, 'ALL'>, SystemLabel> = {
+  DEFAULT: SystemLabel.Default,
+  ARCHIVE: SystemLabel.Archive,
+  BIN: SystemLabel.Bin,
+};
+
+const getDialogListDescription = ({
+  t,
+  viewType,
+  viewIsEmpty,
+  displaySearchResults,
+  filterScope,
+  hasNoResults,
+  onScopeChange,
+}: {
+  t: TFunction;
+  viewType: InboxViewType;
+  viewIsEmpty: boolean;
+  displaySearchResults: boolean;
+  filterScope: FilterScope;
+  hasNoResults: boolean;
+  onScopeChange: (scope: FilterScope) => void;
+}): ReactNode | undefined => {
+  if (viewIsEmpty) {
+    return t(`inbox.heading.no_results.${viewType}`);
+  }
+
+  if (!displaySearchResults) return undefined;
+
+  if (viewType === 'archive' || viewType === 'bin') {
+    return t(`inbox.heading.search_scope_info.${viewType}`);
+  }
+
+  if (filterScope === 'ALL' && hasNoResults) {
+    return '';
+  }
+
+  if (filterScope === 'ALL') {
+    return (
+      <>
+        {t('inbox.heading.narrow_scope')}{' '}
+        <Button variant="tinted" size="mini" onClick={() => onScopeChange('DEFAULT')}>
+          {t('status.default')}
+        </Button>{' '}
+        <Button variant="tinted" size="mini" onClick={() => onScopeChange('ARCHIVE')}>
+          {t('status.archive')}
+        </Button>{' '}
+        {t('word.or')}{' '}
+        <Button variant="tinted" size="mini" onClick={() => onScopeChange('BIN')}>
+          {t('status.bin')}
+        </Button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {t('inbox.heading.expand_scope')}{' '}
+      <Button variant="tinted" size="mini" onClick={() => onScopeChange('ALL')}>
+        {t('inbox.heading.scope.all_folders')}
+      </Button>
+    </>
+  );
+};
+
+const BANKRUPTCY_SERVICE_RESOURCE = 'urn:altinn:resource:app_brg_konkursbehandling';
+
+const sortGroupedDialogs = (arr: DialogListItemProps[]): DialogListItemProps[] => {
+  return arr
+    .map((item) => ({ item, updatedAt: new Date(item.updatedAt ?? 0).getTime() }))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map(({ item }) => item);
+};
+
+const getSearchTitle = (
+  t: TFunction,
+  viewType: InboxViewType,
+  count: number,
+  hasNextPage: boolean,
+  filterScope: FilterScope,
+) =>
+  (hasNextPage ? t('word.moreThan') : '') +
+  t(`inbox.heading.title.${viewType}`, { count }) +
+  (viewType !== 'archive' && viewType !== 'bin' && filterScope !== 'ALL'
+    ? t(`inbox.heading.scope.${filterScope}`)
+    : '');
+
+const DialogListItemLink = ({ href = '', ...props }: Omit<LinkProps, 'to'> & { href?: string }) => (
+  <Link state={{ fromView: location.pathname }} {...props} to={`${href}${location.search}`} />
+);
+
+const stripTitlelessSingleGroup = (
+  groups: Record<string, DialogListGroupPropsSort>,
+): Record<string, DialogListGroupPropsSort> => {
+  const keys = Object.keys(groups);
+  if (keys.length === 1 && !groups[keys[0]]?.title) return {};
+  return groups;
+};
+
+const renderLoadingItems = (size: number): DialogListItemProps[] => {
+  return Array.from({ length: size }, (_, index) => {
+    const randomTitle = Math.random()
+      .toString(2)
+      .substring(2, 9 + Math.floor(Math.random() * 7));
+    const randomDescription = Math.random()
+      .toString(2)
+      .substring(2, 10 + Math.floor(Math.random() * 21));
+    return {
+      groupId: 'loading',
+      title: randomTitle,
+      id: `${index}`,
+      summary: randomDescription,
+      state: 'normal',
+      loading: true,
+    };
+  });
+};
+
+const useGroupedDialogs = ({
+  items,
+  displaySearchResults,
+  viewType,
+  isLoading,
+  isFetchingNextPage,
+  onSeenByLogModalChange,
+  onAccessInfoModalChange,
+  hasNextPage,
+  filterState,
+  onFiltersChange,
+  applicablePartyCount,
+}: UseGroupedDialogsProps): UseGroupedDialogsOutput => {
+  const { t } = useTranslation();
+  const format = useFormat();
+  const [searchParams] = useSearchParams();
+  const systemLabelActions = useDialogActions();
+  const [selectedGroup] = useGlobalState<PartyGroup | null>(QUERY_KEYS.SELECTED_GROUP, null);
+  const shouldGroup = selectedGroup !== null || applicablePartyCount > 1;
+  const [bulkMode, setBulkMode] = useGlobalState<boolean>(QUERY_KEYS.BULK_MODE, false);
+  const [bulkedIds, setBulkedIds] = useGlobalState<string[]>(QUERY_KEYS.BULK_MODE_SELECTED_IDS, []);
+  const collapseGroups = !!displaySearchResults;
+  const filterScope = (searchParams.get('systemLabel') || 'ALL') as FilterScope;
+
+  const onScopeChange = (scope: FilterScope) => {
+    if (!onFiltersChange || !filterState) return;
+    const next: FilterState = { ...filterState };
+    if (scope === 'ALL') {
+      next.systemLabel = [];
+    } else {
+      next.systemLabel = [SCOPE_TO_SYSTEM_LABEL[scope]];
+    }
+    onFiltersChange(next);
+  };
+
+  const viewIsEmpty = !isLoading && items.length === 0 && !displaySearchResults;
+  const description = getDialogListDescription({
+    t,
+    viewType,
+    viewIsEmpty,
+    displaySearchResults: !!displaySearchResults,
+    filterScope,
+    hasNoResults: !isLoading && items.length === 0,
+    onScopeChange,
+  });
+
+  const clockPrefix = t('word.clock_prefix');
+  const formatString = `do MMMM yyyy ${clockPrefix ? `'${clockPrefix}' ` : ''}HH.mm`;
+  const useDateGrouping = !displaySearchResults;
+
+  const onToggleBulkId = useCallback(
+    (id: string) => {
+      if (bulkedIds?.includes(id)) {
+        const newBulkedIds = bulkedIds.filter((bulkedId) => bulkedId !== id);
+        setBulkedIds(newBulkedIds);
+        if (!newBulkedIds.length) {
+          setBulkMode(false);
+        }
+      } else {
+        setBulkedIds([...bulkedIds, id]);
+      }
+    },
+    [bulkedIds, setBulkedIds, setBulkMode],
+  );
+
+  const formatDialogItem = useCallback(
+    (item: InboxItemInput, groupId: string): DialogListItemProps => {
+      const contextMenuId = 'dialog-context-menu-' + item.id;
+      const contextMenu: ContextMenuProps = {
+        id: contextMenuId,
+        placement: 'right',
+        color: item.recipient.type === 'person' ? 'person' : 'company',
+        items: [
+          {
+            id: 'select-multiple',
+            groupId: 'mark-as',
+            title: t('bulk_action.select_multiple'),
+            icon: CheckmarkIcon,
+            onClick: () => {
+              setBulkMode(true);
+              setBulkedIds([item.id]);
+            },
+          },
+          ...(item ? systemLabelActions(item.id, item.label, item.unread) : []),
+          ...(item.seenByLabel
+            ? [
+                {
+                  id: 'seenby-log',
+                  groupId: 'logs',
+                  title: item.seenByLabel,
+                  icon: item.seenByLog,
+                  onClick: () => {
+                    onSeenByLogModalChange({
+                      title: item.title,
+                      dialogId: item.id,
+                      items: item.seenByLog.items,
+                    });
+                  },
+                },
+              ]
+            : []),
+          {
+            id: 'access-info',
+            groupId: 'logs',
+            title: t('dialog.access_info.menu_item'),
+            icon: InformationSquareIcon,
+            onClick: () => onAccessInfoModalChange({ dialogId: item.id, title: item.title }),
+          },
+        ].map((menuItem) => ({ ...menuItem, id: `${contextMenuId}-${menuItem.id}` })),
+        'aria-label': t('dialog.context_menu.label', { title: item.title }),
+      };
+
+      const disabledBulkItem = bulkMode && bulkedIds.length >= MAX_COUNT_BULK_DIALOGS && !bulkedIds.includes(item.id);
+
+      return {
+        groupId,
+        title: item.title,
+        id: item.id,
+        recipientLabel: t('word.to'),
+        archivedAtLabel: item.viewType === 'archive' ? t(`status.archive`) : '',
+        trashedAtLabel: item.viewType === 'bin' ? t(`status.bin`) : '',
+        sender: item.sender,
+        summary: item.summary,
+        recipient: item.recipient,
+        color: item.recipient.type?.toLowerCase() as 'person' | 'company',
+        grouped: shouldGroup,
+        attachmentsCount: item.guiAttachmentCount,
+        seenByLog: item.seenByLog,
+        unread: item.unread,
+        unreadLabel: t('word.unread'),
+        unreadItemsLabel: t('word.unread_content'),
+        unreadItems: item.unreadItems,
+        selectable: bulkMode,
+        tabIndex: bulkMode ? 0 : undefined,
+        selected: bulkedIds?.includes(item.id),
+        controls: bulkMode ? (
+          <ItemSelect
+            checked={bulkedIds?.includes(item.id)}
+            onClick={() => onToggleBulkId(item.id)}
+            disabled={disabledBulkItem}
+          />
+        ) : (
+          <ContextMenu {...contextMenu} />
+        ),
+        status: getDialogStatus(item.status, t),
+        extendedStatusLabel: item.extendedStatus,
+        updatedAt: item.contentUpdatedAt,
+        updatedAtLabel: format(item.contentUpdatedAt, formatString),
+        dueAt: getDueAtProps(item.dueAt, item.status, t, (date) => format(date, formatString)),
+        sentCount: item.fromPartyTransmissionsCount ?? 0,
+        receivedCount: item.fromServiceOwnerTransmissionsCount ?? 0,
+        ariaLabel: item.title,
+        ...(bulkMode ? { onClick: () => onToggleBulkId(item.id) } : { href: `/inbox/${item.id}/` }),
+        disabled: disabledBulkItem,
+        as: bulkMode ? 'button' : DialogListItemLink,
+      };
+    },
+    [
+      t,
+      format,
+      formatString,
+      shouldGroup,
+      bulkMode,
+      bulkedIds,
+      onToggleBulkId,
+      systemLabelActions,
+      onSeenByLogModalChange,
+      onAccessInfoModalChange,
+      setBulkMode,
+      setBulkedIds,
+    ],
+  );
+
+  const grouped = useMemo((): UseGroupedDialogsOutput => {
+    if (isLoading) {
+      return {
+        groupedDialogs: renderLoadingItems(5),
+        groups: {
+          loading: { title: t(`word.loading`) },
+        },
+      };
+    }
+
+    if (!displaySearchResults && !useDateGrouping && !isLoading) {
+      const groups: Record<string, DialogListGroupPropsSort> = {};
+      const allDialogs: DialogListItemProps[] = [];
+
+      // bankruptcy exception
+      const bankruptcyDialogs = items.filter((item) => item.serviceResource === BANKRUPTCY_SERVICE_RESOURCE);
+      const regularItems = items.filter((item) => item.serviceResource !== BANKRUPTCY_SERVICE_RESOURCE);
+
+      // bankruptcy group
+      if (bankruptcyDialogs.length > 0) {
+        groups.bankruptcy = {
+          orderIndex: 9999,
+        };
+        allDialogs.push(...bankruptcyDialogs.map((item) => formatDialogItem(item, 'bankruptcy')));
+      }
+
+      groups[viewType] = {
+        description: <Trans i18nKey={`inbox.heading.description.${viewType}`} components={{ strong: <strong /> }} />,
+        orderIndex: null,
+      };
+      allDialogs.push(...regularItems.map((item) => formatDialogItem(item, item.viewType)));
+
+      const groupedDialogs = sortGroupedDialogs(allDialogs);
+      if (isFetchingNextPage) {
+        groupedDialogs.push(...renderLoadingItems(1));
+      }
+      return {
+        groupedDialogs,
+        groups: stripTitlelessSingleGroup(groups),
+        title: getSearchTitle(t, viewType, items.length, hasNextPage, filterScope),
+      };
+    }
+
+    const groupedItems: GroupedItem[] = [];
+    const bankruptcyDialogs = items.filter((item) => item.serviceResource === BANKRUPTCY_SERVICE_RESOURCE);
+    const regularDialogs = items.filter((item) => item.serviceResource !== BANKRUPTCY_SERVICE_RESOURCE);
+    const title = getSearchTitle(t, viewType, regularDialogs.length, hasNextPage, filterScope);
+
+    if (bankruptcyDialogs.length > 0) {
+      groupedItems.push({
+        id: 'bankruptcy',
+        items: bankruptcyDialogs,
+        // Konkurs dialogs should always be in top
+        orderIndex: 9999,
+      });
+    }
+
+    if (collapseGroups) {
+      groupedItems.push({
+        id: 'collapsed',
+        description: t('search.results.description'),
+        items: regularDialogs,
+        orderIndex: null,
+      });
+    } else {
+      const currentYear = new Date().getFullYear();
+      const allWithinSameYear = items.every((item) => new Date(item.contentUpdatedAt).getFullYear() === currentYear);
+
+      const countByViewType = new Map<string, number>();
+      if (displaySearchResults) {
+        for (const item of regularDialogs) {
+          countByViewType.set(item.viewType, (countByViewType.get(item.viewType) ?? 0) + 1);
+        }
+      }
+
+      const groupsById = new Map(groupedItems.map((group) => [group.id, group]));
+      for (const item of regularDialogs) {
+        const updatedAt = new Date(item.contentUpdatedAt);
+        const month = format(updatedAt, 'LLLL');
+        const capitalizedMonth = month.charAt(0).toUpperCase() + month.slice(1);
+
+        const groupKey = displaySearchResults
+          ? item.viewType
+          : allWithinSameYear
+            ? capitalizedMonth
+            : format(updatedAt, 'yyyy');
+
+        const groupByDate = !displaySearchResults;
+        const label = displaySearchResults
+          ? t(`inbox.heading.search_results.${groupKey}`, {
+              count: countByViewType.get(groupKey) ?? 0,
+            })
+          : groupKey;
+
+        const existingGroup = groupsById.get(groupKey);
+
+        if (existingGroup) {
+          existingGroup.items.push(item);
+        } else {
+          const viewTypeIndex = ['bin', 'archive', 'sent', 'drafts', 'inbox'].indexOf(item.viewType);
+          const orderIndex = groupByDate
+            ? allWithinSameYear
+              ? updatedAt.getMonth()
+              : updatedAt.getFullYear()
+            : viewTypeIndex;
+          const newGroup = { id: groupKey, title: label, description: '', items: [item], orderIndex };
+          groupsById.set(groupKey, newGroup);
+          groupedItems.push(newGroup);
+        }
+      }
+    }
+
+    const groups = Object.fromEntries(
+      groupedItems.map(({ id, title, description, orderIndex }) => [id, { title, orderIndex, description }]),
+    );
+
+    const mappedGroupedDialogs = groupedItems.flatMap(({ id, items: groupItems }) =>
+      groupItems.map((item) => formatDialogItem(item, id.toString())),
+    );
+
+    const groupedDialogs = sortGroupedDialogs(mappedGroupedDialogs);
+
+    if (isFetchingNextPage) {
+      groupedDialogs.push(...renderLoadingItems(1));
+    }
+
+    return { groupedDialogs, groups: stripTitlelessSingleGroup(groups), title };
+  }, [
+    items,
+    displaySearchResults,
+    useDateGrouping,
+    collapseGroups,
+    t,
+    format,
+    formatDialogItem,
+    viewType,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    filterScope,
+  ]);
+
+  return { ...grouped, description };
+};
+
+export default useGroupedDialogs;

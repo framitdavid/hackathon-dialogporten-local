@@ -1,0 +1,19 @@
+{
+  "name": "e2e",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "e2e:test": "playwright test",
+    "e2e:codegen": "playwright codegen",
+    "e2e:ci": "playwright test",
+    "install:browsers": "playwright install"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "catalog:",
+    "@types/node": "catalog:"
+  }
+}

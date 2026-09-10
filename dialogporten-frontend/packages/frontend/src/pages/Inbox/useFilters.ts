@@ -1,0 +1,134 @@
+import type { FilterProps, FilterState } from '@altinn/altinn-components';
+import { useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router';
+import type { InboxViewType } from '../../api/hooks/useDialogs.tsx';
+import { useDialogsForRecommendations } from '../../api/hooks/useDialogsForRecommendations.tsx';
+import { useFilterServiceResources } from '../../api/hooks/useServiceResource.ts';
+import { useDateFnsLocale } from '../../i18n/useDateFnsLocale.tsx';
+import { getOrganization } from '../../utils/organizations.ts';
+import { createServiceFilter, FilterCategory, formatDateRange, getFilters, readFiltersFromURLQuery } from './filters';
+import { useOrganizations } from './useOrganizations.ts';
+
+interface UseFiltersOutput {
+  filters: FilterProps[];
+  getFilterLabel: (
+    name: string,
+    value: (string | number)[] | undefined,
+    filterState?: FilterState,
+  ) => string | undefined;
+}
+
+interface UseFiltersProps {
+  viewType: InboxViewType;
+}
+
+export const useFilters = ({ viewType }: UseFiltersProps): UseFiltersOutput => {
+  const { t } = useTranslation();
+  const dialogsForRecommendations = useDialogsForRecommendations();
+  const { locale } = useDateFnsLocale();
+  const { organizations } = useOrganizations();
+  const { serviceResources } = useFilterServiceResources();
+  const [params] = useSearchParams();
+
+  const currentFilters = useMemo(() => {
+    const filters = readFiltersFromURLQuery(params.toString());
+    const normalizedFilters: Record<string, string[]> = {};
+
+    for (const [key, value] of Object.entries(filters)) {
+      if (Array.isArray(value)) {
+        normalizedFilters[key] = value.map(String);
+      }
+    }
+
+    if (normalizedFilters.updated && normalizedFilters.updated.length > 0) {
+      normalizedFilters.updated = [normalizedFilters.updated[0]];
+    }
+
+    return normalizedFilters;
+  }, [params]);
+
+  const serviceFilterValues = currentFilters.service;
+  const serviceFilter = useMemo(
+    () =>
+      createServiceFilter({
+        serviceResources,
+        currentFilters: { service: serviceFilterValues },
+        allOrganizations: organizations,
+      }),
+    [serviceResources, serviceFilterValues, organizations],
+  );
+
+  const filters: FilterProps[] = useMemo(
+    () =>
+      getFilters({
+        allDialogs: dialogsForRecommendations,
+        allOrganizations: organizations,
+        viewType,
+        prebuiltServiceFilter: serviceFilter,
+      }),
+    [dialogsForRecommendations, organizations, viewType, serviceFilter],
+  );
+
+  const getFilterLabel = useCallback(
+    (name: string, value: (string | number)[] | undefined, filterState?: FilterState): string | undefined => {
+      const filter = filters.find((f) => f.name === name);
+
+      if (filter && !value?.length) {
+        if (typeof filter.title === 'string' || typeof filter.label === 'string') {
+          return filter.title;
+        }
+      }
+
+      if (!filter || !value?.length) {
+        return undefined;
+      }
+
+      if (name === FilterCategory.STATUS) {
+        if (value?.length > 2) {
+          return t('inbox.filter.multiple.status', { count: value?.length });
+        }
+        return value.map((v) => t(`status.${v.toString().toLowerCase()}`)).join(', ');
+      }
+
+      if (name === FilterCategory.SYSTEM_LABEL) {
+        return value.map((v) => t(`status.${v.toString().toLowerCase()}`)).join(', ');
+      }
+
+      if (name === FilterCategory.IS_CONTENT_SEEN) {
+        return value.map((v) => t(`filter.is_content_seen.${v.toString().toLowerCase()}`)).join(', ');
+      }
+
+      if (name === FilterCategory.UPDATED) {
+        if (value[0] === 'fromAndToDate') {
+          const dateDate = formatDateRange(filterState?.fromDate?.[0], filterState?.toDate?.[0], locale);
+          if (dateDate) {
+            return dateDate;
+          }
+        }
+
+        return value.map((v) => t(`filter.date.${v.toString().toLowerCase()}`)).join(', ');
+      }
+
+      if (name === FilterCategory.ORG) {
+        if (value?.length === 1) {
+          const serviceOwner = getOrganization(organizations, String(value[0]));
+          return serviceOwner?.name || '';
+        }
+        return t('inbox.filter.multiple.sender', { count: value?.length });
+      }
+
+      if (name === FilterCategory.SERVICE) {
+        if (value?.length === 1) {
+          return t('inbox.filter.single.service');
+        }
+        return t('inbox.filter.multiple.service', { count: value?.length });
+      }
+
+      return undefined;
+    },
+    [filters, t, organizations, locale],
+  );
+
+  return { filters, getFilterLabel };
+};

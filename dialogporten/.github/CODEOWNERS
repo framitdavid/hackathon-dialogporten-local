@@ -1,0 +1,4 @@
+*                   @altinn/team-dialogporten-backend
+.azure/**           @altinn/team-dialogporten-backend @altinn/team-dialogporten-infra
+.github/**          @altinn/team-dialogporten-backend @altinn/team-dialogporten-infra
+.github/CODEOWNERS  @altinn/team-dialogporten-backend

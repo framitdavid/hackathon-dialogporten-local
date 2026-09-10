@@ -1,0 +1,17 @@
+fragment OrganizationFields on Organization {
+  id
+  name {
+    en
+    nb
+    nn
+  }
+  logo
+  orgnr
+  homepage
+  environments
+  contact {
+    email
+    phone
+    url
+  }
+}

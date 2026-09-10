@@ -1,0 +1,109 @@
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Transmissions;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Common;
+
+internal interface IDialogTransmissionAppender
+{
+    DialogTransmissionAppendResult Append(
+        DialogEntity dialog,
+        IReadOnlyCollection<DialogTransmission> newTransmissions);
+}
+
+internal sealed record DialogTransmissionAppendResult(
+    bool ContainsEndUserTransmission,
+    bool ContainsServiceOwnerTransmission);
+
+internal sealed class DialogTransmissionAppender : IDialogTransmissionAppender
+{
+    private readonly IDialogDbContext _db;
+    private readonly IClock _clock;
+    private readonly IDomainContext _domainContext;
+
+    public DialogTransmissionAppender(
+        IDialogDbContext db,
+        IClock clock,
+        IDomainContext domainContext)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(domainContext);
+
+        _db = db;
+        _clock = clock;
+        _domainContext = domainContext;
+    }
+
+    public DialogTransmissionAppendResult Append(
+        DialogEntity dialog,
+        IReadOnlyCollection<DialogTransmission> newTransmissions)
+    {
+        if (newTransmissions.Count == 0)
+        {
+            return new DialogTransmissionAppendResult(false, false);
+        }
+
+        var (fromParty, fromServiceOwner) = newTransmissions.GetTransmissionCounts();
+
+        var sumFromParty = fromParty + dialog.FromPartyTransmissionsCount;
+        if (sumFromParty > short.MaxValue)
+        {
+            _domainContext.AddError(
+                nameof(DialogEntity.FromPartyTransmissionsCount),
+                $"'{nameof(DialogEntity.FromPartyTransmissionsCount)}' cannot exceed {short.MaxValue}."
+            );
+            fromParty = 0;
+        }
+        else
+        {
+            dialog.FromPartyTransmissionsCount = (short)sumFromParty;
+        }
+
+        var sumFromServiceOwner = fromServiceOwner + dialog.FromServiceOwnerTransmissionsCount;
+        if (sumFromServiceOwner > short.MaxValue)
+        {
+            _domainContext.AddError(
+                nameof(DialogEntity.FromServiceOwnerTransmissionsCount),
+                $"'{nameof(DialogEntity.FromServiceOwnerTransmissionsCount)}' cannot exceed {short.MaxValue}."
+            );
+            fromServiceOwner = 0;
+        }
+        else
+        {
+            dialog.FromServiceOwnerTransmissionsCount = (short)sumFromServiceOwner;
+        }
+
+        if (fromParty > 0 || fromServiceOwner > 0)
+        {
+            dialog.Transmissions.AddRange(newTransmissions);
+            _db.DialogTransmissions.AddRange(newTransmissions);
+        }
+
+        foreach (var attachment in newTransmissions.SelectMany(x => x.Attachments))
+        {
+            ValidateTimeFields(attachment);
+        }
+
+        return new DialogTransmissionAppendResult(
+            fromParty > 0,
+            fromServiceOwner > 0);
+    }
+
+    private void ValidateTimeFields(DialogTransmissionAttachment attachment)
+    {
+        if (!_db.MustWhenAdded(attachment,
+                propertyExpression: x => x.ExpiresAt,
+                predicate: x => x > _clock.UtcNowOffset || x == null))
+        {
+            var idString = attachment.Id == Guid.Empty ? string.Empty : $" (Id: {attachment.Id})";
+
+            _domainContext.AddError($"{nameof(DialogEntity.Transmissions)}." +
+                                    $"{nameof(DialogTransmission.Attachments)}." +
+                                    $"{nameof(DialogTransmissionAttachment.ExpiresAt)}",
+                $"Must be in future or null, got '{attachment.ExpiresAt}'.{idString}");
+        }
+    }
+}

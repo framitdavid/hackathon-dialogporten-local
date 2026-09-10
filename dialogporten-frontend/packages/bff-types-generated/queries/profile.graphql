@@ -1,0 +1,61 @@
+query profile {
+  profile {
+    updatedAt
+    language
+    groups {
+      id
+      name
+      isFavorite
+      parties
+    }
+    user {
+      userId
+      userUuid
+      userName
+      email
+      isReserved
+      phoneNumber
+      externalIdentity
+      partyId
+
+      party {
+        partyId
+        partyUuid
+        partyTypeName
+        orgNumber
+        ssn
+        unitType
+        name
+        isDeleted
+        onlyHierarchyElementWithNoAccess
+
+        person {
+          ssn
+          name
+          firstName
+          middleName
+          lastName
+          telephoneNumber
+          mobileNumber
+          mailingAddress
+          mailingPostalCode
+          mailingPostalCity
+          addressMunicipalNumber
+          addressMunicipalName
+          addressStreetName
+          addressHouseNumber
+          addressHouseLetter
+          addressPostalCode
+          addressCity
+          dateOfDeath
+        }
+      }
+      profileSettingPreference {
+        shouldShowDeletedEntities
+        showClientUnits
+        preselectedPartyUuid
+        doNotPromptForParty
+      }
+    }
+  }
+}

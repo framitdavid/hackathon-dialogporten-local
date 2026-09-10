@@ -1,0 +1,460 @@
+import type { AttachmentLinkProps, AvatarProps, ContactButtonProps, SeenByLogProps } from '@altinn/altinn-components';
+import { formatDisplayName } from '@altinn/altinn-components';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  type Actor,
+  ActorType,
+  type AttachmentFieldsFragment,
+  AttachmentUrlConsumer,
+  type DialogByIdFieldsFragment,
+  type DialogStatus,
+  type GetDialogByIdQuery,
+  type OrganizationFieldsFragment,
+  type PartyFieldsFragment,
+  SystemLabel,
+} from 'bff-types-generated';
+import { type TFunction, t } from 'i18next';
+import { useCallback } from 'react';
+import { useAuthenticatedQuery } from '../../auth/useAuthenticatedQuery.ts';
+import type { DialogActionProps } from '../../components/DialogDetails/DialogDetails.tsx';
+import { QUERY_KEYS } from '../../constants/queryKeys.ts';
+import { useFeatureFlag } from '../../featureFlags';
+import { getPreferredPropertyByLocale, type LocalizationObject, type ValueType } from '../../i18n/property.ts';
+import type { FormatFunction } from '../../i18n/useDateFnsLocale.tsx';
+import { type Locale, useDateFnsLocale, useFormat } from '../../i18n/useDateFnsLocale.tsx';
+import { useOrganizations } from '../../pages/Inbox/useOrganizations.ts';
+import { type ActivityLogEntry, getActivityHistory } from '../../utils/activities.tsx';
+import { createExpiryBadge, mediaTypeToExt, mediaTypeToIcon } from '../../utils/attachments.ts';
+import { getSeenByLabel, getServiceOwnerLogo } from '../../utils/dialog.ts';
+import type { LabelAssignmentLog } from '../../utils/labelAssignmentLogs.tsx';
+import type { NotificationLog } from '../../utils/notificationLogs.tsx';
+import { getOrganization, getOrganizationByLocale, type OrganizationOutput } from '../../utils/organizations.ts';
+import { getTransmissions, type TimelineSegmentWithTransmissions } from '../../utils/transmissions.ts';
+import { getViewTypes } from '../../utils/viewType.ts';
+import { graphQLSDK } from '../queries.ts';
+import type { InboxViewType } from './useDialogs.tsx';
+import { useLabelAssignmentLog } from './useLabelAssignmentLog.ts';
+import { useNotificationLogs } from './useNotificationLogs.tsx';
+import type { ProfileType } from './useParties.ts';
+import { useSelectedProfile } from './usePartiesSelectors.ts';
+
+export enum EmbeddableMediaType {
+  markdown = 'application/vnd.dialogporten.frontchannelembed-url;type=text/markdown',
+  html = 'application/vnd.dialogporten.frontchannelembed-url;type=text/html',
+}
+
+export interface EmbeddedContent {
+  /* URL to content provided by service owner */
+  url: string;
+  /* Media type of content */
+  mediaType: EmbeddableMediaType;
+}
+
+export interface DialogByIdDetails {
+  /* id of dialog */
+  id: string;
+  /* service owner of dialog */
+  org: string;
+  /* party with access to dialog */
+  party: string;
+  /* serviceResourceType (source) */
+  serviceResourceType: string;
+  /* summary of dialog by locale,sorted by preference */
+  summary: string;
+  /* sender of dialog, fallbacks to dialog's service owner */
+  sender: AvatarProps;
+  /* recipient of dialog, fallbacks to current end-user */
+  receiver: AvatarProps;
+  /* title of dialog by locale,sorted by preference */
+  title: string;
+  /* actions available for dialog  */
+  guiActions: DialogActionProps[];
+  /* additional info of dialog by locale, sorted by preference - can be markdown / HTML */
+  additionalInfo: { value: string; mediaType: string } | undefined;
+  /* attachments for dialog, same of each attachment can be represented differently through list of URLs  */
+  attachments: AttachmentLinkProps[];
+  /* Used for guiActions and front channel embeds */
+  dialogToken: string;
+  /* main content reference for dialog, used to dynamically embed content in the frontend from an external URL. */
+  mainContentReference?: EmbeddedContent;
+  /* all activities for dialog, including transmissions */
+  activityHistory: ActivityLogEntry[];
+  /* last updated timestamp */
+  updatedAt: string;
+  /* created timestamp */
+  createdAt: string;
+  /* list of system labels for the dialog */
+  label: SystemLabel[];
+  /* all transmissions for dialog, grouped by relationship */
+  transmissions: TimelineSegmentWithTransmissions[];
+  /* a map of all content references for all content reference for transmission, used to dynamically embed content in the frontend from an external URL. */
+  contentReferenceForTransmissions: Record<string, EmbeddedContent>;
+  /* dialog status */
+  status: DialogStatus;
+  /* extended dialog status */
+  extendedStatusLabel?: string;
+  /* all actions (including end-user) that have seen the dialog since last update */
+  seenByLog: SeenByLogProps;
+  /* due date for dialog: This is the last date when the dialog is expected to be completed. */
+  dueAt?: string | null;
+  /* view type of dialog, used for grouping in inbox */
+  viewType: InboxViewType;
+  /* Number of outgoing transmissions */
+  sentCount?: number;
+  /* Number of incoming transmissions */
+  receivedCount?: number;
+  /* Unread or not, determined by label, logs and/or hasUnOpenedContent */
+  unread: boolean;
+  /* contact buttons derived from contactInfo and sender name */
+  contactButtons: ContactButtonProps[];
+}
+
+interface UseDialogByIdOutput {
+  isSuccess: boolean;
+  isError: boolean;
+  isLoading: boolean;
+  dataUpdatedAt: number;
+  dialog?: DialogByIdDetails;
+  isAuthLevelTooLow?: boolean;
+  refreshDialogToken: () => Promise<string | undefined>;
+}
+export const getDialogsById = (id: string): Promise<GetDialogByIdQuery> =>
+  graphQLSDK.getDialogById({
+    id,
+  });
+
+export const getAttachmentLinks = (
+  attachments: AttachmentFieldsFragment[],
+  locale: Locale,
+  t: TFunction<'translation', undefined>,
+): AttachmentLinkProps[] => {
+  return attachments
+    .filter((a) => a.urls.filter((url) => url.consumerType === AttachmentUrlConsumer.Gui).length > 0)
+    .flatMap((attachment) =>
+      attachment.urls
+        .filter((url) => url.consumerType === AttachmentUrlConsumer.Gui)
+        .map((url) => {
+          const isUnauthorized = url.url === 'urn:dialogporten:unauthorized';
+          return {
+            disabled: isUnauthorized || (attachment.expiresAt ? new Date(attachment.expiresAt) <= new Date() : false),
+            label: getPreferredPropertyByLocale(attachment.displayName)?.value || url.url,
+            href: isUnauthorized ? '' : url.url,
+            metadata: mediaTypeToExt(url.mediaType),
+            badge: createExpiryBadge(attachment.expiresAt, locale, t),
+            icon: mediaTypeToIcon(url.mediaType),
+            target: url.mediaType === 'text/html' ? '_self' : '_blank',
+          };
+        }),
+    );
+};
+
+const getMainContentReference = (
+  args: { value: ValueType; mediaType: string } | undefined | null,
+  isAuthorized: boolean,
+): EmbeddedContent | undefined => {
+  if (!isAuthorized || typeof args === 'undefined' || args === null) return undefined;
+
+  const { value, mediaType } = args;
+  const content = getPreferredPropertyByLocale(value);
+  const isValidMediaType = Object.values(EmbeddableMediaType).includes(mediaType as EmbeddableMediaType);
+
+  if (!content || !isValidMediaType) return undefined;
+
+  return {
+    url: content.value,
+    mediaType: mediaType as EmbeddableMediaType,
+  };
+};
+
+/**
+ * Maps an `Actor` (sender of a transmission or activity) to normalized
+ * display props used by the Avatar component.
+ *
+ * Rules:
+ * - `actor.actorType === ServiceOwner`: Always treated as a company.
+ *   Will use `serviceOwner.name` and `serviceOwner.logo` if available.
+ * - `actor.actorId` containing `"urn:altinn:organization:"`: Treated as a company and `urn:altinn:systemuser`: Treated as a system user
+ * - Otherwise: Treated as a person.
+ *
+ * Name resolution:
+ * - Prefer `actor.actorName` if present.
+ * - If missing and the actor is a `ServiceOwner`, fall back to `serviceOwner?.name`.
+ * - Otherwise empty string.
+ *
+ * Logo resolution:
+ * - Only provided for `ServiceOwner` actors (from `serviceOwner?.logo`).
+ *
+ * Notes:
+ * - `actorName` may be `null` in edge cases if Dialogporten lookup fails,
+ *   but is generally expected to be set for transmissions.
+ *
+ * @param actor        The actor object describing who performed or sent the action.
+ * @param stopReversingPersonNameOrder
+ * @param serviceOwner Optional service owner metadata used for name/logo fallback.
+ * @param contentSenderName Overridden sender name. If not supplied, assume service owner as the sender name if actor type is Service owner.
+ * @param serviceOwnerNbName
+ * @returns Normalized avatar props (`name`, `type`, `imageUrl`, `imageUrlAlt`).
+ */
+
+export const getActorProps = (
+  actor: Actor,
+  stopReversingPersonNameOrder: boolean,
+  serviceOwner?: OrganizationOutput,
+  contentSenderName?: LocalizationObject[] | undefined,
+  serviceOwnerNbName?: string,
+): AvatarProps => {
+  const isServiceOwner = actor.actorType === ActorType.ServiceOwner;
+  const isSystemUser = actor?.actorId?.includes('urn:altinn:systemuser:');
+  const isCompany = isServiceOwner || (actor.actorId ?? '').includes('urn:altinn:organization:');
+  const type: AvatarProps['type'] = isSystemUser ? 'system' : isCompany ? 'company' : 'person';
+  const actorName = formatDisplayName({
+    fullName: actor.actorName ?? '',
+    type,
+    reverseNameOrder: stopReversingPersonNameOrder ? false : !isCompany && !isSystemUser,
+  });
+  const preferredSenderName = getPreferredPropertyByLocale(contentSenderName)?.value;
+  const serviceOwnerDisplayName = preferredSenderName || serviceOwner?.name || '';
+  const name = actor.actorName ? actorName : isServiceOwner ? serviceOwnerDisplayName : '';
+  const logo = isServiceOwner ? getServiceOwnerLogo(contentSenderName, serviceOwner, serviceOwnerNbName) : undefined;
+  const logoAlt = logo ? t('dialog.imageAltURL', { companyName: name }) : undefined;
+
+  return {
+    name,
+    type,
+    imageUrl: logo,
+    imageUrlAlt: logoAlt,
+  };
+};
+
+const getContactButtons = (
+  contactInfo: OrganizationOutput['contact'] | undefined | null,
+  senderName: string,
+): ContactButtonProps[] => {
+  const buttons: ContactButtonProps[] = [];
+  if (contactInfo?.url || contactInfo?.email) {
+    buttons.push({
+      label: t('dialog.help.contact_sender', { name: senderName }),
+      href: contactInfo.url ?? `mailto:${contactInfo.email}`,
+    });
+  }
+  if (contactInfo?.phone) {
+    buttons.push({
+      label: t('dialog.help.phone', { number: contactInfo.phone }),
+      href: `tel:${contactInfo.phone}`,
+    });
+  }
+  return buttons;
+};
+
+export function mapDialogToInboxItem({
+  item,
+  parties,
+  organizations,
+  format,
+  stopReversingPersonNameOrder,
+  selectedProfile,
+  locale,
+  notificationLogs = [],
+  labelAssignmentLogs = [],
+}: {
+  item: DialogByIdFieldsFragment | null | undefined;
+  parties: PartyFieldsFragment[];
+  organizations: OrganizationFieldsFragment[];
+  format: FormatFunction;
+  stopReversingPersonNameOrder: boolean;
+  selectedProfile: ProfileType;
+  locale: Locale;
+  notificationLogs?: NotificationLog[];
+  labelAssignmentLogs?: LabelAssignmentLog[];
+}): DialogByIdDetails | undefined {
+  if (!item) {
+    return undefined;
+  }
+  const clockPrefix = t('word.clock_prefix');
+  const formatString = `do MMMM yyyy ${clockPrefix ? `'${clockPrefix}' ` : ''}HH.mm`;
+  const titleObj = item?.content?.title?.value;
+  const additionalInfoObj = item?.content?.additionalInfo?.value;
+  const summaryObj = item?.content?.summary?.value;
+  const mainContentReference = item?.content?.mainContentReference;
+  const endUserParty = parties?.find((party) => party.isCurrentEndUser);
+  const dialogRecipientParty = parties?.find((party) => party.party === item.party);
+  const actualRecipientParty = dialogRecipientParty ?? endUserParty;
+  const serviceOwner = getOrganization(organizations || [], item.org);
+  const serviceOwnerNbName = getOrganizationByLocale(organizations || [], item.org, 'nb')?.name;
+  const senderName = item.content.senderName?.value;
+  const extendedStatusObj = item.content.extendedStatus?.value;
+  const { seenByLabel } = getSeenByLabel(item.seenSinceLastContentUpdate, t);
+  const transmissions = getTransmissions({
+    transmissions: item.transmissions,
+    format,
+    activities: item.activities,
+    stopReversingPersonNameOrder,
+    serviceOwner,
+    selectedProfile,
+    locale,
+    senderName,
+    serviceOwnerNbName,
+  });
+
+  return {
+    id: item.id,
+    org: item.org,
+    party: item.party,
+    serviceResourceType: item.serviceResourceType,
+    title: getPreferredPropertyByLocale(titleObj)?.value ?? '',
+    status: item.status,
+    extendedStatusLabel: getPreferredPropertyByLocale(extendedStatusObj)?.value || undefined,
+    summary: getPreferredPropertyByLocale(summaryObj)?.value ?? '',
+    sentCount: item.fromPartyTransmissionsCount ?? 0,
+    receivedCount: item.fromServiceOwnerTransmissionsCount ?? 0,
+    sender: {
+      name: getPreferredPropertyByLocale(senderName)?.value || serviceOwner?.name || '',
+      type: 'company',
+      imageUrl: getServiceOwnerLogo(senderName, serviceOwner, serviceOwnerNbName),
+      imageUrlAlt: t('dialog.imageAltURL', { companyName: getPreferredPropertyByLocale(senderName)?.value }),
+    },
+    receiver: {
+      name: actualRecipientParty?.name ?? '',
+      type: actualRecipientParty?.partyType === 'Organization' ? 'company' : 'person',
+      isParent: Array.isArray(actualRecipientParty?.subParties),
+      isDeleted: actualRecipientParty?.isDeleted,
+    },
+    additionalInfo: {
+      value: getPreferredPropertyByLocale(additionalInfoObj)?.value ?? '',
+      mediaType: item.content?.additionalInfo?.mediaType ?? '',
+    },
+    guiActions: item.guiActions.map((guiAction) => ({
+      id: guiAction.id,
+      url: guiAction.url,
+      hidden: guiAction.isDeleteDialogAction && !item.endUserContext?.systemLabels.includes(SystemLabel.Bin),
+      priority: guiAction.priority,
+      httpMethod: guiAction.httpMethod,
+      title: getPreferredPropertyByLocale(guiAction.title)?.value ?? '',
+      prompt: getPreferredPropertyByLocale(guiAction.prompt)?.value,
+      isDeleteAction: guiAction.isDeleteDialogAction,
+      disabled: !guiAction.isAuthorized,
+    })),
+    attachments: getAttachmentLinks(item.attachments, locale, t),
+    mainContentReference: getMainContentReference(mainContentReference, true),
+    contentReferenceForTransmissions: item.transmissions.reduce(
+      (acc, transmission) => {
+        const reference = getMainContentReference(transmission.content?.contentReference, transmission.isAuthorized);
+        if (reference) {
+          acc[transmission.id] = reference;
+        }
+        return acc;
+      },
+      {} as Record<string, EmbeddedContent>,
+    ),
+    dialogToken: item.dialogToken!,
+    seenByLog: {
+      collapsible: true,
+      title: seenByLabel,
+      endUserLabel: t('word.you'),
+      items: item.seenSinceLastContentUpdate.map((seen) => {
+        const actorProps = getActorProps(
+          seen.seenBy,
+          stopReversingPersonNameOrder,
+          serviceOwner,
+          senderName,
+          serviceOwnerNbName,
+        );
+        return {
+          name: actorProps.name,
+          type: actorProps.type,
+          id: seen.id,
+          isEndUser: seen.isCurrentEndUser,
+          seenAt: seen.seenAt,
+          seenAtLabel: format(seen.seenAt, formatString),
+        };
+      }),
+    },
+    activityHistory: getActivityHistory({
+      stopReversingPersonNameOrder,
+      activities: item.activities,
+      transmissions: item.transmissions,
+      notificationLogs,
+      labelAssignmentLogs,
+      format,
+      serviceOwner,
+      selectedProfile,
+      locale,
+      serviceOwnerNbName,
+    }),
+    transmissions,
+    createdAt: item.createdAt,
+    updatedAt: item.contentUpdatedAt,
+    label: item.endUserContext?.systemLabels,
+    viewType: getViewTypes({ status: item.status, systemLabel: item.endUserContext?.systemLabels })?.[0],
+    dueAt: item.dueAt,
+    unread: !item.isContentSeen,
+    contactButtons: getContactButtons(
+      serviceOwner?.contact,
+      getPreferredPropertyByLocale(senderName)?.value || serviceOwner?.name || '',
+    ),
+  };
+}
+
+export const useDialogById = (parties: PartyFieldsFragment[], id?: string): UseDialogByIdOutput => {
+  const format = useFormat();
+  const { locale } = useDateFnsLocale();
+  const { organizations, isLoading: isOrganizationsLoading } = useOrganizations();
+
+  const queryClient = useQueryClient();
+  const disableFlipNamesPatch = useFeatureFlag<boolean>('dialogporten.disableFlipNamesPatch');
+  const selectedProfile = useSelectedProfile();
+  const { notificationLogs } = useNotificationLogs(id);
+  const { entries: labelAssignmentLogs } = useLabelAssignmentLog(id);
+  const partyURIs = parties.map((party) => party.party);
+  const { data, isSuccess, isLoading, isError, dataUpdatedAt } = useAuthenticatedQuery<GetDialogByIdQuery>({
+    queryKey: [QUERY_KEYS.DIALOG_BY_ID, id],
+    staleTime: 0,
+    refetchInterval: 1000 * 60 * 9,
+    refetchOnWindowFocus: 'always',
+    retry: 3,
+    queryFn: async () => {
+      const response = await getDialogsById(id!);
+      const dialogTitles = response.dialogById?.dialog?.content?.title?.value;
+      const dialogTitle = getPreferredPropertyByLocale(dialogTitles)?.value;
+
+      if (dialogTitle) {
+        queryClient.setQueryData([QUERY_KEYS.CURRENT_DIALOG_TITLE], dialogTitle);
+      }
+
+      return response;
+    },
+    enabled: typeof id !== 'undefined' && partyURIs.length > 0,
+  });
+
+  const refreshDialogToken = useCallback(async (): Promise<string | undefined> => {
+    if (!id) return undefined;
+    await queryClient.refetchQueries({ queryKey: [QUERY_KEYS.DIALOG_BY_ID, id] });
+    const freshData = queryClient.getQueryData<GetDialogByIdQuery>([QUERY_KEYS.DIALOG_BY_ID, id]);
+    return freshData?.dialogById?.dialog?.dialogToken ?? undefined;
+  }, [queryClient, id]);
+
+  if (isOrganizationsLoading) {
+    return { isLoading: true, isError: false, isSuccess: false, dataUpdatedAt: Date.now(), refreshDialogToken };
+  }
+
+  return {
+    isLoading,
+    isSuccess,
+    dialog: mapDialogToInboxItem({
+      item: data?.dialogById?.dialog,
+      parties,
+      organizations,
+      format,
+      stopReversingPersonNameOrder: disableFlipNamesPatch,
+      selectedProfile,
+      locale,
+      notificationLogs,
+      labelAssignmentLogs,
+    }),
+    dataUpdatedAt,
+    isError,
+    isAuthLevelTooLow:
+      data?.dialogById?.errors?.some((error) => error.__typename === 'DialogByIdForbiddenAuthLevelTooLow') ?? false,
+    refreshDialogToken,
+  };
+};

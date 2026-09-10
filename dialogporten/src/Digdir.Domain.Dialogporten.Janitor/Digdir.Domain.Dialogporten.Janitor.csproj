@@ -1,0 +1,37 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Azure.Monitor.Query.Logs" Version="1.0.0"/>
+        <PackageReference Include="Cocona" Version="2.2.0"/>
+        <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+        <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.11" />
+        <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.11" />
+        <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.11" />
+        <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.11" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+        <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+        <PackageReference Include="Serilog.Settings.Configuration" Version="10.0.1" />
+        <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1"/>
+        <PackageReference Include="Azure.Storage.Blobs" Version="12.29.2" />
+        <PackageReference Include="Parquet.Net" Version="6.1.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Update="appsettings*.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
+        <None Update="CostManagementAggregation/cost-coefficients.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Digdir.Domain.Dialogporten.Infrastructure\Digdir.Domain.Dialogporten.Infrastructure.csproj"/>
+        <ProjectReference Include="..\Digdir.Library.Utils.AspNet\Digdir.Library.Utils.AspNet.csproj"/>
+    </ItemGroup>
+
+</Project>

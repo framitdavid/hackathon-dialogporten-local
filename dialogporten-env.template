@@ -1,0 +1,15 @@
+# ENV variables for docker-compose
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=supersecret
+POSTGRES_DB=dialogporten
+DB_CONNECTION_STRING=Server=dialogporten-postgres;Port=5432;Database=${POSTGRES_DB};User ID=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};
+
+COMPOSE_PROJECT_NAME=digdir
+
+# User secrets (macOS default). Override per OS if needed.
+USER_SECRETS_DIR=${HOME}/.microsoft/usersecrets
+
+# OTEL
+OTEL_NAMESPACE=dialogporten-local
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc

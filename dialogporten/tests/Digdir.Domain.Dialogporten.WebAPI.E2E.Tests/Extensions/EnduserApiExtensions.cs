@@ -1,0 +1,76 @@
+using Altinn.ApiClients.Dialogporten.EndUser;
+using Altinn.ApiClients.Dialogporten.EndUser.Features.V1;
+using Altinn.ApiClients.Dialogporten.EndUser.Features.V1.Common;
+using Altinn.ApiClients.Dialogporten.EndUser.Features.V1.Get;
+using Altinn.ApiClients.Dialogporten.EndUser.Features.V1.Search;
+using Altinn.ApiClients.Dialogporten.EndUser.Features.V1.SystemLabels;
+using Refit;
+
+namespace Digdir.Domain.Dialogporten.WebAPI.E2E.Tests.Extensions;
+
+public static class EnduserApiExtensions
+{
+    extension(IEndUserApi enduserApi)
+    {
+        public Task<IApiResponse> SetSystemLabels(
+            Guid dialogId,
+            Action<SetDialogSystemLabelRequest>? modify = null,
+            Guid? revision = null,
+            CancellationToken? cancellationToken = null)
+        {
+            var request = new SetDialogSystemLabelRequest
+            {
+                AddLabels = []
+            };
+            modify?.Invoke(request);
+            return enduserApi.V1.SetDialogSystemLabels(
+                dialogId,
+                request,
+                revision,
+                cancellationToken: cancellationToken ?? TestContext.Current.CancellationToken);
+        }
+
+        public Task<IApiResponse<Dialog>> GetDialog(
+            Guid dialogId,
+            AcceptedLanguages? acceptedLanguages = null,
+            CancellationToken cancellationToken = default) =>
+            enduserApi.V1.GetDialog(
+                dialogId,
+                acceptedLanguages ?? new(),
+                cancellationToken: cancellationToken);
+
+        public Task<IApiResponse> BulkSetSystemLabels(
+            Action<BulkSetSystemLabel> modify,
+            CancellationToken? cancellationToken = null)
+        {
+            var request = new BulkSetSystemLabel();
+            modify(request);
+            return enduserApi.V1.BulkSetDialogSystemLabels(
+                request,
+                cancellationToken: cancellationToken ?? TestContext.Current.CancellationToken);
+        }
+
+        public Task<IApiResponse<ICollection<LabelAssignmentLog>>> GetSystemLabelAssignmentLog(
+            Guid dialogId,
+            CancellationToken? cancellationToken = null) =>
+            enduserApi.V1.SearchDialogLabelAssignmentLogs(
+                dialogId,
+                cancellationToken: cancellationToken ?? TestContext.Current.CancellationToken);
+
+        public Task<IApiResponse<DialogTransmissionDetails>> GetTransmission(
+            Guid dialogId,
+            Guid transmissionId,
+            CancellationToken? cancellationToken = null) =>
+            enduserApi.V1.GetDialogTransmission(
+                dialogId,
+                transmissionId,
+                cancellationToken: cancellationToken ?? TestContext.Current.CancellationToken);
+
+        public Task<IApiResponse<ICollection<DialogTransmissionSearchItem>>> SearchTransmissions(
+            Guid dialogId,
+            CancellationToken? cancellationToken = null) =>
+            enduserApi.V1.SearchDialogTransmissions(
+                dialogId,
+                cancellationToken: cancellationToken ?? TestContext.Current.CancellationToken);
+    }
+}

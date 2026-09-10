@@ -1,0 +1,511 @@
+import {
+  BookmarkModal,
+  BulkFooter,
+  BulkHeader,
+  Button,
+  DialogList,
+  DsAlert,
+  DsParagraph,
+  type FilterState,
+  Heading,
+  PageBase,
+  type SeenByLogItemProps,
+  Toolbar,
+  ToolbarFilter,
+  ToolbarMenu,
+  ToolbarSearch,
+  Typography,
+} from '@altinn/altinn-components';
+import { XMarkIcon } from '@navikt/aksel-icons';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useLocation, useSearchParams } from 'react-router';
+import { MAX_COUNT_BULK_DIALOGS, useBulkActions } from '../../api/hooks/useBulkActions.ts';
+import {
+  type InboxViewType,
+  MAX_DIALOG_PARTY_SIZE,
+  MAX_SERVICE_OWNER_SIZE,
+  MAX_SERVICE_RESOURCE_SIZE,
+  useDialogs,
+} from '../../api/hooks/useDialogs.tsx';
+import { useParties } from '../../api/hooks/useParties.ts';
+import { createFiltersURLQuery } from '../../auth';
+import { DialogAccessInfoModal } from '../../components/DialogAccessInfoModal/DialogAccessInfoModal.tsx';
+import { ExportSearchResultsButton } from '../../components/ExportSearchResultsButton/ExportSearchResultsButton.tsx';
+import { Notice } from '../../components/Notice/Notice.tsx';
+import { useAccounts } from '../../components/PageLayout/Accounts/useAccounts.tsx';
+import { getPageRouteTitle } from '../../components/PageLayout/pageRouteToTitle.ts';
+import { getSearchWords } from '../../components/PageLayout/Search/getSearchLabels.ts';
+import { useSearchString } from '../../components/PageLayout/Search/useSearchString.ts';
+import { useHeaderConfig } from '../../components/PageLayout/useHeaderConfig.tsx';
+import { SaveSearchButton } from '../../components/SavedSearchButton/SaveSearchButton.tsx';
+import { isSavedSearchDisabled } from '../../components/SavedSearchButton/savedSearchEnabled.ts';
+import { SeenByModal } from '../../components/SeenByModal/SeenByModal.tsx';
+import { SINotice } from '../../components/SINotice/SINotice.tsx';
+import { QUERY_KEYS } from '../../constants/queryKeys.ts';
+import { useFeatureFlag } from '../../featureFlags';
+import { useAlertBanner } from '../../hooks/useAlertBanner.ts';
+import { usePageTitle } from '../../hooks/usePageTitle.ts';
+import { useGlobalState } from '../../useGlobalState.ts';
+import { PageRoutes } from '../routes.ts';
+import { useSavedSearches } from '../SavedSearches/useSavedSearches.tsx';
+import { AccountNavigator } from './AccountNavigator.tsx';
+import { AlertBanner } from './AlertBanner.tsx';
+import { FilterCategory, hasValidFilters, readFiltersFromURLQuery } from './filters';
+import styles from './inbox.module.css';
+import { encodeSubAccountIds, FixedGlobalQueryParams, PartyGroups, VariableGlobalQueryParams } from './queryParams.ts';
+import { useBookmarkModal } from './useBookmarkModal.tsx';
+import { useFilters } from './useFilters.ts';
+import useGroupedDialogs from './useGroupedDialogs.tsx';
+import { useMockError } from './useMockError.ts';
+import { useSubAccounts } from './useSubAccounts.tsx';
+
+interface InboxProps {
+  viewType: InboxViewType;
+}
+
+export interface CurrentSeenByLog {
+  title: string;
+  dialogId: string;
+  items: SeenByLogItemProps[];
+}
+
+const MAX_SCROLL_TO_ITEM_ATTEMPTS = 5;
+
+export const Inbox = ({ viewType }: InboxProps) => {
+  useMockError();
+  const { t } = useTranslation();
+
+  const {
+    selectedParties,
+    selectedPartyIds,
+    setSelectedPartyIds,
+    selectedGroup,
+    parties,
+    partiesEmptyList,
+    isError: unableToLoadParties,
+    isLoading: isLoadingParties,
+    partyGraph,
+  } = useParties();
+
+  const { saveSearch, onSaveSearch, onDeleteSavedSearch } = useSavedSearches(selectedPartyIds);
+  const [bulkMode, setBulkMode] = useGlobalState<boolean>(QUERY_KEYS.BULK_MODE, false);
+  const [bulkedIds, setBulkedIds] = useGlobalState<string[]>(QUERY_KEYS.BULK_MODE_SELECTED_IDS, []);
+  const location = useLocation();
+  const scrolledToItem = useRef<string | undefined>(undefined);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [currentSeenByLogModal, setCurrentSeenByLogModal] = useState<CurrentSeenByLog | null>(null);
+  const [accessInfoModal, setAccessInfoModal] = useState<{ dialogId: string; title: string } | null>(null);
+  const subAccountsParam = searchParams.get(FixedGlobalQueryParams.subAccounts) ?? '';
+
+  const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromURLQuery(searchParams.toString()));
+
+  // Sync URL → filterState for external navigation (back button, link clicks, etc.)
+  useEffect(() => {
+    setFilterState(readFiltersFromURLQuery(searchParams.toString()));
+  }, [searchParams]);
+
+  const { inboxSearch } = useHeaderConfig(filterState);
+
+  const isAlertBannerEnabled = useFeatureFlag<boolean>('inbox.enableAlertBanner');
+  const isExportSearchResultsEnabled = useFeatureFlag<boolean>('inbox.enableExportSearchResults');
+  const alertBannerContent = useAlertBanner();
+
+  const onFiltersChange = useCallback(
+    (filters: FilterState, clearSearch = false) => {
+      setFilterState(filters);
+
+      const allowedFilters = Object.values(FilterCategory);
+      setSearchParams(
+        (prev) => {
+          const baseURL = new URL(`${window.location.origin}${window.location.pathname}?${prev.toString()}`);
+          const next = createFiltersURLQuery(filters, allowedFilters, baseURL.toString()).searchParams;
+          if (clearSearch) {
+            next.delete(VariableGlobalQueryParams.search);
+          }
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const { enteredSearchValue } = useSearchString();
+  const validSearchString = enteredSearchValue.length > 2 ? enteredSearchValue : undefined;
+  const selectedServices = (filterState.service ?? []) as string[];
+  const selectedServicesCount = selectedServices.length;
+  const serviceLimitReached = selectedServicesCount > MAX_SERVICE_RESOURCE_SIZE;
+  const selectedServiceOwners = (filterState.org ?? []) as string[];
+  const serviceOwnerLimitReached = selectedServiceOwners.length > MAX_SERVICE_OWNER_SIZE;
+
+  const {
+    accounts,
+    accountSearch,
+    accountGroups,
+    onSelectAccount,
+    currentAccountName,
+    searchable: accountsSearchable,
+  } = useAccounts({
+    parties,
+    selectedParties,
+    selectedGroup,
+    partyGraph,
+    setSelectedPartyIds,
+    options: {
+      showGroups: true,
+    },
+  });
+
+  const {
+    subAccounts,
+    onSelectSubAccount,
+    getSubAccountLabel,
+    partyIdsOverride,
+    searchable: subAccountsSearchable,
+    subAccountGroups,
+    accountNavigatorHidden,
+  } = useSubAccounts({
+    accounts,
+    selectedParties,
+    selectedGroup,
+    selectedServicesCount,
+  });
+  const searchMode = hasValidFilters(filterState) || !!validSearchString;
+  const showSubAccountsMenu = subAccounts.length > 0;
+  const accountNavigatorVisible = !accountNavigatorHidden;
+
+  const subAccountsParamForSave = useMemo(() => {
+    if (subAccountsParam) return subAccountsParam;
+    return encodeSubAccountIds(partyIdsOverride ?? []) ?? '';
+  }, [partyIdsOverride, subAccountsParam]);
+
+  const savedSearchFilterState = useMemo<FilterState>(() => {
+    if (!subAccountsParamForSave) return filterState;
+    return {
+      ...filterState,
+      [FixedGlobalQueryParams.subAccounts]: [subAccountsParamForSave],
+    };
+  }, [filterState, subAccountsParamForSave]);
+
+  const { bookmarkModalProps, openSaveModal, openEditModal } = useBookmarkModal({
+    filterState: savedSearchFilterState,
+    enteredSearchValue,
+    viewType,
+    selectedPartyIds,
+    saveSearch,
+    updateSavedSearchTitle: (id, name) => onSaveSearch?.(id, name) ?? Promise.resolve(),
+    deleteSavedSearch: onDeleteSavedSearch,
+  });
+
+  const savedSearchDisabled = isSavedSearchDisabled(savedSearchFilterState, partyIdsOverride, enteredSearchValue);
+  const onResetAllFilter = () => {
+    onFiltersChange({}, true);
+  };
+
+  const {
+    dialogs,
+    isLoading: isLoadingDialogs,
+    isError: isErrorDialogs,
+    fetchNextPage,
+    isFetchingNextPage,
+    hasNextPage,
+    isQueryEnabled,
+    partyLimitExceeded,
+    applicablePartyCount,
+  } = useDialogs({
+    viewType,
+    filterState,
+    search: validSearchString,
+    serviceResources: selectedServices,
+    partyIdsOverride: partyIdsOverride?.length ? partyIdsOverride : [],
+  });
+
+  const isLimitReached = !isQueryEnabled;
+  /* Suppress the list's empty-state heading when we already show a limit notice or an error,
+     so we never render a misleading "no messages" alongside those. */
+  const hideListHeader = isLimitReached || isErrorDialogs;
+
+  const onCloseBulkMode = useCallback(() => {
+    setBulkMode(false);
+    setBulkedIds([]);
+  }, [setBulkMode, setBulkedIds]);
+
+  const onSelectAll = useCallback(() => {
+    setBulkedIds(dialogs.map((d) => d.id).slice(0, MAX_COUNT_BULK_DIALOGS));
+  }, [dialogs, setBulkedIds]);
+
+  const { footerActions, headerActions } = useBulkActions({
+    selectedDialogIds: bulkedIds,
+    allDialogs: dialogs,
+    onSelectAll,
+    onDismiss: onCloseBulkMode,
+  });
+
+  const { filters, getFilterLabel } = useFilters({ viewType });
+
+  usePageTitle({
+    baseTitle: viewType,
+    searchValue: enteredSearchValue,
+    filterState,
+    getFilterLabel,
+  });
+
+  const isLoading = isLoadingParties || isLoadingDialogs;
+
+  const scrollToId: string | undefined = location?.state?.scrollToId;
+
+  useEffect(() => {
+    if (isLoading || !scrollToId || scrolledToItem.current === scrollToId) {
+      return;
+    }
+
+    let attempt = 0;
+    let frameId = 0;
+
+    const scrollToItem = () => {
+      const listElToScroll = document.getElementById(scrollToId);
+      if (listElToScroll) {
+        scrolledToItem.current = scrollToId;
+        listElToScroll.scrollIntoView({ behavior: 'instant', block: 'center' });
+        return;
+      }
+      if (attempt++ < MAX_SCROLL_TO_ITEM_ATTEMPTS) {
+        frameId = requestAnimationFrame(scrollToItem);
+      }
+    };
+
+    scrollToItem();
+    return () => cancelAnimationFrame(frameId);
+  }, [isLoading, scrollToId]);
+
+  const { groupedDialogs, groups, title, description } = useGroupedDialogs({
+    onSeenByLogModalChange: setCurrentSeenByLogModal,
+    onAccessInfoModalChange: setAccessInfoModal,
+    items: dialogs,
+    hasNextPage,
+    displaySearchResults: searchMode,
+    filters: filterState,
+    filterState,
+    onFiltersChange,
+    viewType,
+    isLoading,
+    isFetchingNextPage,
+    applicablePartyCount,
+  });
+
+  const dialogItems = useMemo(() => {
+    return hideListHeader ? [] : groupedDialogs;
+  }, [groupedDialogs, hideListHeader]);
+
+  const dialogListGroups = useMemo(() => {
+    const firstKey = Object.keys(groups)[0];
+    if (!firstKey) return groups;
+    return {
+      ...groups,
+      [firstKey]: {
+        title: <span className={styles.searchButtonWrapper}>{groups[firstKey]?.title}</span>,
+      },
+    };
+  }, [groups]);
+
+  const sortGroupBy = useCallback(
+    ([aKey]: [string, unknown], [bKey]: [string, unknown]) =>
+      (groups[bKey]?.orderIndex ?? 0) - (groups[aKey]?.orderIndex ?? 0),
+    [groups],
+  );
+
+  const highlightWords = useMemo(
+    () => (searchMode ? getSearchWords(enteredSearchValue) : undefined),
+    [searchMode, enteredSearchValue],
+  );
+
+  if (unableToLoadParties) {
+    return (
+      <PageBase>
+        <Heading as="h1" size="xl">
+          {t(getPageRouteTitle(PageRoutes[viewType]))}
+        </Heading>
+        <DsAlert data-color="danger">
+          <Heading data-size="xs">{t('inbox.unable_to_load_parties.title')}</Heading>
+          <DsParagraph>
+            {t('inbox.unable_to_load_parties.body')}
+            <a href="/api/logout">{t('inbox.unable_to_load_parties.link')}</a>
+          </DsParagraph>
+        </DsAlert>
+      </PageBase>
+    );
+  }
+
+  if (partiesEmptyList) {
+    return (
+      <PageBase>
+        <Heading as="h1" size="xl">
+          {t(getPageRouteTitle(PageRoutes[viewType]))}
+        </Heading>
+        <Notice title={t('inbox.no_parties_found')} />
+      </PageBase>
+    );
+  }
+
+  return (
+    <PageBase>
+      <BulkHeader
+        hidden={!bulkMode}
+        title={t(
+          bulkedIds?.length >= MAX_COUNT_BULK_DIALOGS
+            ? 'bulk_action.header.selected_max_reached'
+            : 'bulk_action.header.selected',
+          { count: bulkedIds?.length ?? 0 },
+        )}
+        options={headerActions}
+        dismissable={true}
+        onDismiss={onCloseBulkMode}
+        color={bulkedIds.length >= MAX_COUNT_BULK_DIALOGS ? 'warning' : 'company'}
+      />
+      {!searchMode && (
+        <Heading as="h1" size="xl">
+          {t(getPageRouteTitle(PageRoutes[viewType]))}
+        </Heading>
+      )}
+      <div data-testid="inbox-toolbar">
+        {currentAccountName ? (
+          <Toolbar>
+            <ToolbarMenu
+              disabled={bulkMode}
+              size="md"
+              items={accounts}
+              search={accountSearch}
+              groups={accountGroups}
+              label={currentAccountName}
+              onSelectId={(id: string) => {
+                onSelectAccount(id, PageRoutes[viewType]);
+              }}
+              title={t('parties.change_label')}
+              searchable={accountsSearchable}
+              virtualized={accounts.length > 20}
+            />
+            {showSubAccountsMenu && (
+              <ToolbarMenu
+                disabled={bulkMode}
+                id="toolbarmenu-subAccounts"
+                items={subAccounts}
+                groups={subAccountGroups}
+                onSelectId={onSelectSubAccount}
+                label={getSubAccountLabel()}
+                title={t('parties.subunit.change_label')}
+                searchable={subAccountsSearchable}
+                virtualized={subAccounts.length > 20}
+              />
+            )}
+            <ToolbarSearch {...inboxSearch} disabled={bulkMode} />
+            <ToolbarFilter
+              showResetButton={false}
+              disabled={bulkMode}
+              filters={filters}
+              filterState={filterState}
+              onFilterStateChange={onFiltersChange}
+              getFilterLabel={(name: string, filterValues: (string | number)[] | undefined) =>
+                getFilterLabel?.(name, filterValues, filterState)
+              }
+              addLabel={t('filter_bar.add_filter')}
+              addNextLabel={t('filter_bar.add')}
+              resetLabel={t('filter_bar.reset_filters')}
+              submitLabel={t('filter.show_all_results')}
+              removeLabel={t('filter_bar.remove_filter')}
+            />
+            {searchMode && !bulkMode && (
+              <Button onClick={onResetAllFilter} variant="ghost">
+                <XMarkIcon aria-hidden="true" />
+                <span>{t('filter_bar.reset_filters')}</span>
+              </Button>
+            )}
+            <SaveSearchButton
+              viewType={viewType}
+              hidden={savedSearchDisabled || bulkMode}
+              filterState={savedSearchFilterState}
+              onSaveClick={openSaveModal}
+              onEditClick={openEditModal}
+            />
+          </Toolbar>
+        ) : (
+          <Toolbar>
+            <Button as="div" loading>
+              {t('word.loading')}
+            </Button>
+          </Toolbar>
+        )}
+      </div>
+      <SINotice />
+      <AlertBanner showAlertBanner={isAlertBannerEnabled && !!alertBannerContent} />
+      <AccountNavigator hidden={accountNavigatorHidden} subAccounts={subAccounts} partyIdsOverride={partyIdsOverride} />
+      {isErrorDialogs ? (
+        <DsAlert data-color="danger">
+          <DsParagraph>{t('inbox.dialogs_error.description')}</DsParagraph>
+        </DsAlert>
+      ) : serviceLimitReached ? (
+        <Typography variant="subtle" size="sm">
+          <p>{t('inbox.service_limit_reached.description', { count: MAX_SERVICE_RESOURCE_SIZE })} </p>
+        </Typography>
+      ) : serviceOwnerLimitReached ? (
+        <Typography variant="subtle" size="sm">
+          <p>{t('inbox.service_owner_limit_reached.description', { count: MAX_SERVICE_OWNER_SIZE })}</p>
+        </Typography>
+      ) : partyLimitExceeded && !accountNavigatorVisible ? (
+        <Typography variant="subtle" size="sm">
+          <p>
+            {t(
+              selectedGroup === PartyGroups.ALL_PERSONS
+                ? 'inbox.party_limit_reached.description_persons'
+                : 'inbox.party_limit_reached.description',
+              { count: MAX_DIALOG_PARTY_SIZE },
+            )}
+          </p>
+        </Typography>
+      ) : null}
+      <DialogList
+        title={
+          hideListHeader ? undefined : searchMode ? (
+            isLoading ? (
+              <Heading as="h2" loading>
+                {t('word.loading')}
+              </Heading>
+            ) : (
+              title
+            )
+          ) : undefined
+        }
+        items={dialogItems}
+        groups={dialogListGroups}
+        sortGroupBy={sortGroupBy}
+        isLoading={isLoading}
+        highlightWords={highlightWords}
+        description={hideListHeader ? undefined : description}
+      />
+      {hasNextPage && (
+        <Button aria-label={t('dialog.aria.fetch_more')} onClick={fetchNextPage} variant="outline" size="lg">
+          <span data-size="md">{t('dialog.fetch_more')}</span>
+        </Button>
+      )}
+      <ExportSearchResultsButton
+        hidden={!isExportSearchResultsEnabled || bulkMode || isLoading || hideListHeader}
+        items={dialogs}
+        fileNameBase={t(getPageRouteTitle(PageRoutes[viewType]))}
+      />
+      <SeenByModal
+        title={currentSeenByLogModal?.title}
+        items={currentSeenByLogModal?.items}
+        isOpen={!!currentSeenByLogModal}
+        onClose={() => setCurrentSeenByLogModal(null)}
+      />
+      <DialogAccessInfoModal
+        dialogId={accessInfoModal?.dialogId}
+        title={accessInfoModal?.title}
+        isOpen={!!accessInfoModal}
+        onClose={() => setAccessInfoModal(null)}
+      />
+      <BookmarkModal {...bookmarkModalProps} />
+      {footerActions.length > 0 && <BulkFooter hidden={!bulkMode} actions={footerActions} />}
+    </PageBase>
+  );
+};

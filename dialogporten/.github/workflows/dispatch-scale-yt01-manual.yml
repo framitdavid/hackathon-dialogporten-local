@@ -1,0 +1,422 @@
+name: Scale YT01 Manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      state:
+        description: "Scale state"
+        required: true
+        type: choice
+        options:
+          - 'on'
+          - 'off'
+      deploy:
+        description: "Deploy latest version when scaling on (checks if newer version is available)"
+        required: false
+        type: boolean
+        default: true
+      postpone_until:
+        description: "Postpone scheduled shutdown until this datetime in Norwegian time (e.g. 2026-03-01 20:00). Full ISO 8601 also accepted. Only used with 'on'."
+        required: false
+        type: string
+
+run-name: Scale YT01 ${{ inputs.state }}
+
+jobs:
+  scale-on:
+    if: inputs.state == 'on'
+    runs-on: ubuntu-latest
+    environment: yt01
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: "Checkout GitHub Action"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Azure Login
+        uses: ./.github/actions/azure-login
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get PostgreSQL server name
+        id: pg
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Target the canonical postgres2 database (PG18/SSDv2)
+          POSTGRES_NAME=$(az postgres flexible-server list \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[?contains(name, 'dp-be-yt01-postgres2-')].name" \
+            -o tsv)
+
+          if [[ -z "$POSTGRES_NAME" ]]; then
+            echo "Error: No PostgreSQL server matching 'dp-be-yt01-postgres2-' found."
+            exit 1
+          fi
+
+          echo "Found PostgreSQL server: $POSTGRES_NAME"
+          echo "name=$POSTGRES_NAME" >> "$GITHUB_OUTPUT"
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Install containerapp CLI extension
+        run: az extension add --name containerapp --upgrade
+
+      - name: Scale workload profile up
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT_MIN=$(az containerapp env workload-profile show \
+            --name "dp-be-yt01-cae" \
+            --resource-group "$RESOURCE_GROUP" \
+            --workload-profile-name "Dedicated-D8" \
+            --query "properties.minimumCount" -o tsv)
+
+          if [[ "$CURRENT_MIN" -ne 3 ]]; then
+            echo "Scaling workload profile up (current min-nodes: $CURRENT_MIN -> 3)..."
+            az containerapp env workload-profile update \
+              --name "dp-be-yt01-cae" \
+              --resource-group "$RESOURCE_GROUP" \
+              --workload-profile-name "Dedicated-D8" \
+              --min-nodes 3 \
+              --max-nodes 10
+          else
+            echo "Workload profile Dedicated-D8 already at min-nodes=3. Skipping."
+          fi
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Start PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STATE=$(az postgres flexible-server show \
+            --name "${{ steps.pg.outputs.name }}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "state" -o tsv)
+
+          if [[ "$STATE" != "Ready" ]]; then
+            echo "Starting PostgreSQL server: ${{ steps.pg.outputs.name }}"
+            az postgres flexible-server start \
+              --name "${{ steps.pg.outputs.name }}" \
+              --resource-group "$RESOURCE_GROUP"
+          else
+            echo "PostgreSQL server ${{ steps.pg.outputs.name }} is already running."
+          fi
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Activate revisions for all apps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APPS=(
+            "dp-be-yt01-webapi-eu-ca"
+            "dp-be-yt01-webapi-so-ca"
+            "dp-be-yt01-graphql-ca"
+            "dp-be-yt01-service"
+          )
+
+          activate_app() {
+            local APP=$1
+            local REVISION
+            REVISION=$(az containerapp show \
+              --name "$APP" \
+              --resource-group "$RESOURCE_GROUP" \
+              --query "properties.latestReadyRevisionName" -o tsv)
+
+            if [[ -z "$REVISION" || "$REVISION" == "None" ]]; then
+              echo "No ready revision found for $APP"
+              return 1
+            fi
+
+            local STATUS
+            STATUS=$(az containerapp revision show \
+              --name "$APP" \
+              --resource-group "$RESOURCE_GROUP" \
+              --revision "$REVISION" \
+              --query "properties.active" -o tsv)
+
+            if [[ "${STATUS,,}" != "true" ]]; then
+              echo "Activating revision $REVISION for $APP..."
+              az containerapp revision activate \
+                --name "$APP" \
+                --resource-group "$RESOURCE_GROUP" \
+                --revision "$REVISION"
+            else
+              echo "$APP revision $REVISION is already active. Skipping."
+            fi
+          }
+
+          PIDS=()
+          for APP in "${APPS[@]}"; do
+            activate_app "$APP" &
+            PIDS+=($!)
+          done
+          FAILED=0
+          for PID in "${PIDS[@]}"; do
+            wait "$PID" || FAILED=1
+          done
+          if [[ "$FAILED" -ne 0 ]]; then
+            echo "One or more revision activations failed"
+            exit 1
+          fi
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Resume scheduled Container App Jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG_KEY="scaleOffOriginalCron"
+
+          mapfile -t JOBS < <(az containerapp job list \
+            -g "$RESOURCE_GROUP" \
+            --query "[?properties.configuration.triggerType=='Schedule'].name" \
+            -o tsv)
+
+          if [[ ${#JOBS[@]} -eq 0 ]]; then
+            echo "No scheduled Container App Jobs found."
+            exit 0
+          fi
+
+          for JOB in "${JOBS[@]}"; do
+            SAVED_CRON=$(az containerapp job show \
+              -g "$RESOURCE_GROUP" -n "$JOB" \
+              --query "tags.\"${TAG_KEY}\"" -o tsv 2>/dev/null || true)
+
+            if [[ -z "$SAVED_CRON" || "$SAVED_CRON" == "None" ]]; then
+              echo "[$JOB] skipped: no saved cron tag"
+              continue
+            fi
+
+            CURRENT_CRON=$(az containerapp job show \
+              -g "$RESOURCE_GROUP" -n "$JOB" \
+              --query "properties.configuration.scheduleTriggerConfig.cronExpression" \
+              -o tsv)
+
+            if [[ "$CURRENT_CRON" == "$SAVED_CRON" ]]; then
+              echo "[$JOB] already running with correct cron ($CURRENT_CRON). Skipping."
+              continue
+            fi
+
+            az containerapp job update \
+              -g "$RESOURCE_GROUP" -n "$JOB" \
+              --cron-expression "$SAVED_CRON" --only-show-errors >/dev/null
+            echo "[$JOB] resumed (cron=$SAVED_CRON)"
+          done
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Enable public network access for container app environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT=$(az containerapp env show \
+            --name "dp-be-yt01-cae" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.publicNetworkAccess" -o tsv)
+
+          if [[ "${CURRENT,,}" != "enabled" ]]; then
+            echo "Enabling public network access (currently: $CURRENT)..."
+            az containerapp env update \
+              --name "dp-be-yt01-cae" \
+              --resource-group "$RESOURCE_GROUP" \
+              --public-network-access Enabled
+          else
+            echo "Public network access is already enabled. Skipping."
+          fi
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Enable availability test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT=$(az monitor app-insights web-test show \
+            --name "dp-be-yt01-dialogporten-health-test" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "enabled" -o tsv)
+
+          if [[ "${CURRENT,,}" != "true" ]]; then
+            echo "Enabling availability test (currently: $CURRENT)..."
+            az monitor app-insights web-test update \
+              --name "dp-be-yt01-dialogporten-health-test" \
+              --resource-group "$RESOURCE_GROUP" \
+              --enabled true
+          else
+            echo "Availability test is already enabled. Skipping."
+          fi
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+
+      - name: Deploy latest version
+        if: inputs.deploy == true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LATEST_VERSION=$(gh release view --repo "$REPOSITORY" --json tagName -q '.tagName' | sed 's/^v//')
+          echo "Latest release version: $LATEST_VERSION"
+
+          DEPLOYED_VERSION=$(gh variable get LATEST_DEPLOYED_APPS_VERSION \
+            --env yt01 \
+            --repo "$REPOSITORY" 2>/dev/null || echo "")
+          echo "Currently deployed version: ${DEPLOYED_VERSION:-unknown}"
+
+          if [[ "$LATEST_VERSION" != "$DEPLOYED_VERSION" ]]; then
+            echo "Newer version available. Triggering deploy of $LATEST_VERSION..."
+            gh workflow run ci-cd-yt01.yml \
+              --repo "$REPOSITORY" \
+              -f version="$LATEST_VERSION"
+          else
+            echo "Already on latest version ($DEPLOYED_VERSION). Skipping deploy."
+          fi
+
+      - name: Handle postpone variable
+        if: inputs.postpone_until != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+          REPOSITORY: ${{ github.repository }}
+          POSTPONE_UNTIL: ${{ inputs.postpone_until }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Validate input is a single parseable datetime
+          if [[ ${#POSTPONE_UNTIL} -gt 35 ]]; then
+            echo "Error: postpone_until looks malformed (too long). Got: $POSTPONE_UNTIL"
+            exit 1
+          fi
+          if ! TZ=Europe/Oslo date -d "$POSTPONE_UNTIL" +%s > /dev/null 2>&1; then
+            echo "Error: postpone_until is not a valid datetime. Got: $POSTPONE_UNTIL"
+            exit 1
+          fi
+
+          # Canonicalize to UTC. Plain datetimes (without offset) are interpreted
+          # as Norwegian time (Europe/Oslo) so users don't need to think about DST.
+          POSTPONE_TS=$(TZ=Europe/Oslo date -d "$POSTPONE_UNTIL" +%s)
+          POSTPONE_UNTIL=$(date -u -d "@$POSTPONE_TS" +"%Y-%m-%dT%H:%M:%SZ")
+          NOW_TS=$(date +%s)
+
+          if [[ "$POSTPONE_TS" -gt "$NOW_TS" ]]; then
+            gh variable set YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+              --body "$POSTPONE_UNTIL" \
+              --env yt01 \
+              --repo "$REPOSITORY"
+            echo "Shutdown postponed until $POSTPONE_UNTIL"
+          else
+            echo "Warning: Postpone date is in the past. Clearing any existing postpone."
+            gh variable delete YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+              --env yt01 \
+              --repo "$REPOSITORY" || true
+          fi
+
+          CURRENT=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 --repo "$REPOSITORY" 2>/dev/null || echo "")
+          if [[ -n "$CURRENT" ]]; then
+            PRETTY=$(TZ=Europe/Oslo date -d "$CURRENT" +"%b %-d, %Y %H:%M %Z" 2>/dev/null || echo "$CURRENT")
+            echo "## Postpone active until $PRETTY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No postpone set" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Clear stale postpone variable
+        if: inputs.postpone_until == ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Clean up any past-dated postpone variable
+          POSTPONE_UNTIL=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 \
+            --repo "$REPOSITORY" 2>/dev/null || echo "")
+
+          if [[ -n "$POSTPONE_UNTIL" ]]; then
+            POSTPONE_TS=$(date -d "$POSTPONE_UNTIL" +%s 2>/dev/null || echo "0")
+            NOW_TS=$(date +%s)
+
+            if [[ "$POSTPONE_TS" -le "$NOW_TS" ]]; then
+              echo "Postpone date $POSTPONE_UNTIL is in the past. Clearing variable."
+              gh variable delete YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+                --env yt01 \
+                --repo "$REPOSITORY" || true
+            fi
+          fi
+
+          CURRENT=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 --repo "$REPOSITORY" 2>/dev/null || echo "")
+          if [[ -n "$CURRENT" ]]; then
+            PRETTY=$(TZ=Europe/Oslo date -d "$CURRENT" +"%b %-d, %Y %H:%M %Z" 2>/dev/null || echo "$CURRENT")
+            echo "## Postpone active until $PRETTY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No postpone set" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Logout from Azure
+        if: ${{ always() }}
+        run: az logout
+
+  clear-postpone:
+    if: inputs.state == 'off'
+    runs-on: ubuntu-latest
+    environment: yt01
+    permissions:
+      contents: read
+    steps:
+      - name: Clear postpone variable
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          POSTPONE_UNTIL=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 \
+            --repo "$REPOSITORY" 2>/dev/null || echo "")
+
+          if [[ -n "$POSTPONE_UNTIL" ]]; then
+            gh variable delete YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+              --env yt01 \
+              --repo "$REPOSITORY" || true
+          fi
+
+          CURRENT=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 --repo "$REPOSITORY" 2>/dev/null || echo "")
+          if [[ -n "$CURRENT" ]]; then
+            PRETTY=$(TZ=Europe/Oslo date -d "$CURRENT" +"%b %-d, %Y %H:%M %Z" 2>/dev/null || echo "$CURRENT")
+            echo "## Postpone active until $PRETTY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No postpone set" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  scale-off:
+    if: inputs.state == 'off'
+    needs: clear-postpone
+    uses: ./.github/workflows/workflow-scale-yt01-down.yml
+    permissions:
+      id-token: write
+      contents: read
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      RELEASE_VERSION_STORAGE_PAT: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}

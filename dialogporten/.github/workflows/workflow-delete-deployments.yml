@@ -1,0 +1,49 @@
+name: Delete temporary GitHub deployments
+
+on:
+  workflow_call:
+    inputs:
+      gitSha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  delete_github_deployments:
+    name: Delete GitHub deployments
+    runs-on: self-hosted
+    steps:
+    - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+      with:
+        egress-policy: audit
+
+    - name: Delete Previous deployments
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        GITHUB_SHA_HEAD: ${{ github.event.pull_request.head.sha }}
+      with:
+        script: |
+          const { GITHUB_SHA_HEAD } = process.env
+          const deployments = await github.rest.repos.listDeployments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: GITHUB_SHA_HEAD
+          });
+          await Promise.all(
+            deployments.data.map(async (deployment) => {
+              await github.rest.repos.createDeploymentStatus({ 
+                owner: context.repo.owner, 
+                repo: context.repo.repo, 
+                deployment_id: deployment.id, 
+                state: 'inactive' 
+              });
+              return github.rest.repos.deleteDeployment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                deployment_id: deployment.id
+              });
+            })
+          );

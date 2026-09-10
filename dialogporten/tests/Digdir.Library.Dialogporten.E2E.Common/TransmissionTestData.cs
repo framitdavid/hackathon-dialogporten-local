@@ -1,0 +1,69 @@
+using Altinn.ApiClients.Dialogporten.Features.V1;
+using Digdir.Library.Dialogporten.E2E.Common.Extensions;
+using static Altinn.ApiClients.Dialogporten.Features.V1.Attachments_AttachmentUrlConsumerType;
+
+namespace Digdir.Library.Dialogporten.E2E.Common;
+
+public static class TransmissionTestData
+{
+    public static void AddComplexTransmissions(V1ServiceOwnerDialogsCommandsCreate_Dialog dialog)
+    {
+        var transmissionId = Guid.CreateVersion7();
+        var firstTransmissionCreatedAt = new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var secondTransmissionCreatedAt = firstTransmissionCreatedAt.AddSeconds(1);
+
+        dialog.Transmissions.Clear();
+        dialog.AddTransmission(t =>
+        {
+            t.ExternalReference = "first-transmission";
+            t.Id = transmissionId;
+            t.CreatedAt = firstTransmissionCreatedAt;
+        });
+        dialog.AddTransmission(t =>
+        {
+            t.CreatedAt = secondTransmissionCreatedAt;
+            t.Sender = new()
+            {
+                ActorType = Actors_ActorType.PartyRepresentative,
+                ActorId = $"urn:altinn:organization:identifier-no:{E2EConstants.GetDefaultServiceOwnerOrgNr()}"
+            };
+            t.Content.Summary = new() { Value = [DialogTestData.CreateLocalization("Summary")] };
+            t.Content.ContentReference = new()
+            {
+                MediaType = "application/vnd.dialogporten.frontchannelembed-url;type=text/markdown",
+                Value = [DialogTestData.CreateLocalization("https://digdir.com/content-reference")]
+            };
+            t.RelatedTransmissionId = transmissionId;
+            t.ExtendedType = new Uri("https://digdir.com/transmission-type");
+            t.IdempotentKey = "idempotent-key";
+            t.ExternalReference = "second-transmission";
+            t.NavigationalActions =
+            [
+                new()
+                {
+                    ExpiresAt = DateTime.UtcNow.AddYears(100),
+                    Title = [DialogTestData.CreateLocalization("Action title")],
+                    Url = new Uri("https://digdir.com/action-url")
+                }
+            ];
+            t.Attachments =
+            [
+                new()
+                {
+                    Name = "attachment-name",
+                    ExpiresAt = DateTime.UtcNow.AddYears(100),
+                    DisplayName = [DialogTestData.CreateLocalization("Attachment display name")],
+                    Urls =
+                    [
+                        new()
+                        {
+                            Url = new Uri("https://digdir.com/attachment-url"),
+                            MediaType = "application/pdf",
+                            ConsumerType = Gui
+                        }
+                    ]
+                }
+            ];
+        });
+    }
+}

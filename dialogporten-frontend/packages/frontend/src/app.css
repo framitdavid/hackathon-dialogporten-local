@@ -1,0 +1,21 @@
+/* GLOBAL VARIABLES */
+@import "./globals.css";
+
+:root {
+  font-family: "Inter", sans-serif;
+  /* Enable lowercase l with tail */
+  /* biome-ignore lint/complexity/noImportantStyles: must win over component-level font-feature-settings */
+  font-feature-settings: "cv05" 1 !important;
+  font-synthesis: none;
+  text-rendering: optimizelegibility;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  font-family: "Inter", sans-serif;
+}
+
+.app {
+  width: 100%;
+  margin: 0 auto;
+}

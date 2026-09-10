@@ -1,0 +1,246 @@
+name: CI/CD Pull Request
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - "tests/k6/**"
+
+# Supersede in-flight runs for the same PR: a force-push (rebase, amend, stacked-PR
+# restack) makes the previous run's result irrelevant, so don't let it occupy runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  generate-git-short-sha:
+    name: Generate git short sha
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-generate-git-short-sha.yml
+
+  get-current-version:
+    name: Get current version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-get-current-version.yml
+
+  check-for-changes:
+    name: Check for changes
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-check-for-changes.yml
+
+  build-and-test:
+    uses: ./.github/workflows/workflow-build-and-test.yml
+    needs: [ check-for-changes ]
+    if: ${{ needs.check-for-changes.outputs.hasBackendChanges == 'true' || needs.check-for-changes.outputs.hasTestChanges == 'true' || needs.check-for-changes.outputs.hasDependencyChanges == 'true' }}
+    permissions:
+      contents: read
+
+  # These images are built with `push: false`, so on a PR they only prove the images still
+  # build. `build-and-test` already compiles the same projects, so the marginal signal is
+  # limited to the container context itself — gate on the files that can break that.
+  # `ci-cd-main` rebuilds and pushes them on merge regardless.
+  # `build-and-test` stays in `needs` purely for ordering — don't burn five image builds on a
+  # branch whose tests fail. Its gate is narrower than this one though (a `.dockerignore` or
+  # `.editorconfig` change touches no file it gates on), so it can legitimately be skipped
+  # here, and a skipped dependency would otherwise skip this job.
+  build-docker-images:
+    uses: ./.github/workflows/workflow-publish-docker-images.yml
+    needs: [ build-and-test, check-for-changes ]
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasDockerChanges == 'true' }}
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      GCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      dockerImageBaseName: ghcr.io/altinn/dialogporten-
+      version: test
+      push: false
+
+  validate-schema:
+    name: Validate Schema
+    needs: [ check-for-changes ]
+    if: ${{ needs.check-for-changes.outputs.hasSchemaPackageChanges == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and test schema
+        uses: ./.github/actions/build-schema
+        with:
+          working-directory: docs/schema/V1
+
+  vulnerabilities-introduced:
+    # Fails the PR if it introduces a package@version pair that is vulnerable on the PR head
+    # but was not vulnerable on the base commit. Covers both direct and transitive dependencies
+    # via `dotnet list package --vulnerable --include-transitive`, since GitHub's dependency graph
+    # does not parse packages.lock.json for NuGet.
+    # Restores twice (base + head), so it is gated on the manifests that can change what
+    # NuGet resolves. A PR that touches no dependency manifest cannot introduce a
+    # package@version pair that the base commit did not already have.
+    name: Vulnerabilities introduced
+    needs: [ check-for-changes ]
+    if: ${{ needs.check-for-changes.outputs.hasDependencyChanges == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+
+      - name: Checkout base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: pr/global.json
+          # Safe with RestorePackagesWithLockFile: the lock files are the cache key, and the
+          # head restore below runs `--locked-mode` so drift from them still fails.
+          cache: true
+          cache-dependency-path: 'pr/**/packages.lock.json'
+
+      - name: Scan base (${{ github.event.pull_request.base.ref }})
+        working-directory: base
+        run: |
+          cp "$GITHUB_WORKSPACE/pr/global.json" global.json
+          dotnet restore
+          dotnet list package --vulnerable --include-transitive --format json > "$GITHUB_WORKSPACE/base-vulns.json"
+
+      - name: Scan PR head
+        working-directory: pr
+        run: |
+          dotnet restore --locked-mode
+          dotnet list package --vulnerable --include-transitive --format json > "$GITHUB_WORKSPACE/pr-vulns.json"
+
+      - name: Fail on newly-introduced vulnerabilities
+        run: |
+          set -euo pipefail
+          extract() {
+            jq -r '
+              .projects[]?.frameworks[]? |
+              (.topLevelPackages // []) + (.transitivePackages // []) |
+              .[] |
+              select(.vulnerabilities) |
+              .vulnerabilities[] as $v |
+              "\(.id)@\(.resolvedVersion) [\($v.severity)] \($v.advisoryurl)"
+            ' "$1" | sort -u
+          }
+          extract base-vulns.json > base.txt
+          extract pr-vulns.json > pr.txt
+
+          new=$(comm -13 base.txt pr.txt || true)
+          if [ -n "$new" ]; then
+            {
+              echo "## New vulnerable dependencies introduced by this PR"
+              echo ""
+              echo '```'
+              echo "$new"
+              echo '```'
+              echo ""
+              echo "These package@version pairs are vulnerable on the PR head but were not vulnerable on \`${{ github.event.pull_request.base.ref }}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::New vulnerable dependencies introduced:"
+            echo "$new"
+            exit 1
+          fi
+          echo "No new vulnerable dependencies introduced." >> "$GITHUB_STEP_SUMMARY"
+
+  build-infrastructure:
+    uses: ./.github/workflows/workflow-build-infrastructure.yml
+    needs: [ check-for-changes ]
+    if: ${{ always() && needs.check-for-changes.outputs.hasInfraChanges == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    with:
+      environment: "test"
+
+  dry-run-deploy-infra:
+    name: Dry run deploy infrastructure
+    uses: ./.github/workflows/workflow-deploy-infra.yml
+    needs:
+      [
+        generate-git-short-sha,
+        check-for-changes,
+        get-current-version,
+        build-infrastructure,
+      ]
+    if: ${{ always() && needs.check-for-changes.outputs.hasInfraChanges == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_NAME: ${{ secrets.AZURE_SOURCE_KEY_VAULT_NAME }}
+      AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP: ${{ secrets.AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP }}
+      AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY }}
+    with:
+      environment: test
+      region: norwayeast
+      dryRun: true
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  dry-run-deploy-apps:
+    name: Dry run deploy apps
+    needs:
+      [
+        get-current-version,
+        check-for-changes,
+        generate-git-short-sha,
+        dry-run-deploy-infra,
+      ]
+    # we want deployment of apps to be dependent on deployment of infrastructure, but if infrastructure is skipped, we still want to deploy the apps
+    if: ${{ always() && !failure() && !cancelled() && (needs.check-for-changes.outputs.hasBackendChanges == 'true' || needs.check-for-changes.outputs.hasMigrationChanges == 'true') }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/workflow-deploy-apps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+      AZURE_APP_INSIGHTS_CONNECTION_STRING: ${{ secrets.AZURE_APP_INSIGHTS_CONNECTION_STRING }}
+      AZURE_APP_CONFIGURATION_NAME: ${{ secrets.AZURE_APP_CONFIGURATION_NAME }}
+      AZURE_SERVICE_BUS_NAMESPACE_NAME: ${{ secrets.AZURE_SERVICE_BUS_NAMESPACE_NAME }}
+    with:
+      environment: test
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+      runMigration: ${{ needs.check-for-changes.outputs.hasMigrationChanges == 'true' }}
+      dryRun: true
+
+  delete-github-deployments:
+    name: Delete GitHub deployments
+    uses: ./.github/workflows/workflow-delete-deployments.yml
+    needs: [ dry-run-deploy-apps, dry-run-deploy-infra ]
+    if: ${{ always() && !failure() && !cancelled() }}
+    permissions:
+      contents: read
+      deployments: write
+    with:
+      gitSha: ${{ github.event.pull_request.head.sha }}

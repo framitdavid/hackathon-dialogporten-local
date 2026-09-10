@@ -1,0 +1,87 @@
+import { stitchSchemas } from '@graphql-tools/stitch';
+import type { AsyncExecutor } from '@graphql-tools/utils';
+import axios, { type AxiosResponse } from 'axios';
+import type { FastifyPluginAsync } from 'fastify';
+import fp from 'fastify-plugin';
+import { print } from 'graphql';
+import depthLimit from 'graphql-depth-limit';
+import { createHandler } from 'graphql-http/lib/use/fastify';
+import config from '../config.ts';
+import { encryptPersonUrnsInResponse } from '../party/personUrnTransformers.ts';
+import { decryptPersonUrnsDeep } from '../party/transformPersonUrns.ts';
+import { graphqlCompression } from './compression.ts';
+import { bffSchema, dialogportenSchema } from './schema.ts';
+
+const plugin: FastifyPluginAsync = async (fastify) => {
+  const remoteExecutor: AsyncExecutor = async ({ document, variables, operationName, context }) => {
+    const query = print(document);
+    const token = context!.session.get('token');
+    const resolvedVariables = variables ? decryptPersonUrnsDeep({ ...variables }) : variables;
+    let response: AxiosResponse;
+    try {
+      response = await axios({
+        method: 'POST',
+        url: config.dialogporten.graphqlUrl,
+        timeout: 30000,
+        headers: {
+          'content-type': 'application/json',
+          Authorization: `Bearer ${token.access_token}`,
+        },
+        data: JSON.stringify({ query, variables: resolvedVariables, operationName }),
+      });
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const sanitized = new Error(`Upstream GraphQL request failed: ${err.message}`) as Error & { status?: number };
+        sanitized.status = err.response?.status;
+        throw sanitized;
+      }
+      throw err;
+    }
+
+    return encryptPersonUrnsInResponse(operationName, response.data);
+  };
+
+  const remoteExecutorSubschema = {
+    schema: dialogportenSchema,
+    executor: remoteExecutor,
+  };
+
+  const stitchedSchema = stitchSchemas({
+    subschemas: [remoteExecutorSubschema, bffSchema],
+  });
+
+  const handler = createHandler({
+    schema: stitchedSchema,
+    context(request, reply) {
+      return {
+        session: request.raw.session,
+        request,
+        reply,
+      };
+    },
+    validationRules: [
+      depthLimit(10), // Maximum query depth of 10 levels
+    ],
+  });
+
+  fastify.post(
+    '/api/graphql',
+    {
+      compress: graphqlCompression,
+      preHandler: (request, reply, callback) => {
+        /* Allow graphiql session to renew token since there will no be race conditions in the flow, with multiple requests */
+        const shouldRefreshToken = request.headers.referer?.includes('/api/graphiql') ?? false;
+        return fastify.verifyToken(shouldRefreshToken)(request, reply, callback);
+      },
+    },
+    async (request, reply) => {
+      await handler.call(fastify, request, reply);
+      return reply;
+    },
+  );
+};
+
+export default fp(plugin, {
+  fastify: '5.x',
+  name: 'api-graphql',
+});

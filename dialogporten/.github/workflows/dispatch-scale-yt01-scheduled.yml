@@ -1,0 +1,78 @@
+name: Scale YT01 Scheduled Shutdown
+
+on:
+  schedule:
+    # 16:00 UTC = 17:00 CET (winter) / 18:00 CEST (summer)
+    - cron: '0 16 * * *'
+
+run-name: Scale YT01 Scheduled Shutdown
+
+jobs:
+  check-postpone:
+    runs-on: ubuntu-latest
+    environment: yt01
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.check-postpone.outputs.skip }}
+    steps:
+      - name: Check postpone variable
+        id: check-postpone
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          POSTPONE_UNTIL=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 \
+            --repo "$REPOSITORY" 2>/dev/null || echo "")
+
+          if [[ -n "$POSTPONE_UNTIL" ]]; then
+            POSTPONE_TS=$(date -d "$POSTPONE_UNTIL" +%s 2>/dev/null || echo "0")
+            NOW_TS=$(date +%s)
+
+            if [[ "$POSTPONE_TS" -gt "$NOW_TS" ]]; then
+              echo "Shutdown postponed until $POSTPONE_UNTIL. Skipping."
+              CURRENT=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+                --env yt01 --repo "$REPOSITORY" 2>/dev/null || echo "")
+              if [[ -n "$CURRENT" ]]; then
+                PRETTY=$(TZ=Europe/Oslo date -d "$CURRENT" +"%b %-d, %Y %H:%M %Z" 2>/dev/null || echo "$CURRENT")
+                echo "## Postpone active until $PRETTY" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "## No postpone set" >> "$GITHUB_STEP_SUMMARY"
+              fi
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "Postpone date $POSTPONE_UNTIL is in the past. Clearing variable."
+              gh variable delete YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+                --env yt01 \
+                --repo "$REPOSITORY" || true
+            fi
+          fi
+
+          CURRENT=$(gh variable get YT01_DB_SHUTDOWN_POSTPONE_UNTIL \
+            --env yt01 --repo "$REPOSITORY" 2>/dev/null || echo "")
+          if [[ -n "$CURRENT" ]]; then
+            PRETTY=$(TZ=Europe/Oslo date -d "$CURRENT" +"%b %-d, %Y %H:%M %Z" 2>/dev/null || echo "$CURRENT")
+            echo "## Postpone active until $PRETTY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No postpone set" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+  scale-off:
+    needs: check-postpone
+    if: needs.check-postpone.outputs.skip != 'true'
+    uses: ./.github/workflows/workflow-scale-yt01-down.yml
+    permissions:
+      id-token: write
+      contents: read
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      RELEASE_VERSION_STORAGE_PAT: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}

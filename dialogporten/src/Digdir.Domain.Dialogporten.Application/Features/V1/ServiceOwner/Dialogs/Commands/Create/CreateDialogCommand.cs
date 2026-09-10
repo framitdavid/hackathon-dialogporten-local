@@ -1,0 +1,244 @@
+﻿using System.Diagnostics;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.Presentation;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.DialogStatuses;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.SystemLabelAdder;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Common;
+using Digdir.Domain.Dialogporten.Domain.Common;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Transmissions;
+using Digdir.Library.Entity.Abstractions.Features.Identifiable;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Create;
+
+public sealed class CreateDialogCommand : IRequest<CreateDialogResult>, ISilentUpdater, IFeatureMetricServiceResourceRequest
+{
+    public bool IsSilentUpdate { get; set; }
+    public CreateDialogDto Dto { get; set; } = null!;
+    string IFeatureMetricServiceResourceRequest.ServiceResource => Dto.ServiceResource;
+}
+
+public sealed record CreateDialogSuccess(Guid DialogId, Guid Revision);
+
+[GenerateOneOf]
+public sealed partial class CreateDialogResult : OneOfBase<CreateDialogSuccess, DomainError, ValidationError, Forbidden, Conflict>;
+
+internal sealed class CreateDialogCommandHandler : IRequestHandler<CreateDialogCommand, CreateDialogResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IDomainContext _domainContext;
+    private readonly IResourceRegistry _resourceRegistry;
+    private readonly ISystemLabelAdder _systemLabelAdder;
+    private readonly IServiceResourceAuthorizer _serviceResourceAuthorizer;
+    private readonly ITransmissionHierarchyValidator _transmissionHierarchyValidator;
+    private readonly IUser _user;
+    private readonly IClock _clock;
+    private readonly IUserResourceRegistry _userResourceRegistry;
+
+    public CreateDialogCommandHandler(
+        IUser user,
+        IClock clock,
+        IDialogDbContext db,
+        IUnitOfWork unitOfWork,
+        IDomainContext domainContext,
+        IResourceRegistry resourceRegistry,
+        ISystemLabelAdder systemLabelAdder,
+        IUserResourceRegistry userResourceRegistry,
+        IServiceResourceAuthorizer serviceResourceAuthorizer,
+        ITransmissionHierarchyValidator transmissionHierarchyValidator
+    )
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(domainContext);
+        ArgumentNullException.ThrowIfNull(resourceRegistry);
+        ArgumentNullException.ThrowIfNull(systemLabelAdder);
+        ArgumentNullException.ThrowIfNull(userResourceRegistry);
+        ArgumentNullException.ThrowIfNull(serviceResourceAuthorizer);
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(transmissionHierarchyValidator);
+
+        _user = user;
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _domainContext = domainContext;
+        _resourceRegistry = resourceRegistry;
+        _systemLabelAdder = systemLabelAdder;
+        _userResourceRegistry = userResourceRegistry;
+        _serviceResourceAuthorizer = serviceResourceAuthorizer;
+        _clock = clock;
+        _transmissionHierarchyValidator = transmissionHierarchyValidator;
+    }
+
+    public async Task<CreateDialogResult> Handle(CreateDialogCommand request, CancellationToken cancellationToken)
+    {
+        var dialog = request.Dto.ToDialogEntity();
+        dialog.StatusId = request.Dto.Status.ToDialogStatusValue();
+
+        // Ensure transmissions, attachments and navigational actions have a UUIDv7 ID, needed for the
+        // transmission hierarchy validation and to guarantee deterministic order of input to output dtos.
+        dialog.Transmissions.Cast<IIdentifiableEntity>()
+            .Concat(dialog.Transmissions.SelectMany(x => x.Attachments))
+            .Concat(dialog.Transmissions.SelectMany(x => x.NavigationalActions))
+            .Concat(dialog.Attachments)
+            .EnsureIds();
+
+        // Make sure Party get stored lowercased in db
+        dialog.Party = dialog.Party.ToLowerInvariant();
+
+        await _serviceResourceAuthorizer.SetResourceType(dialog, cancellationToken);
+        var serviceResourceAuthorizationResult = await _serviceResourceAuthorizer.AuthorizeServiceResources(dialog, cancellationToken);
+        if (serviceResourceAuthorizationResult.Value is Forbidden forbiddenResult)
+        {
+            return forbiddenResult;
+        }
+
+        var serviceResourceInformation = await _resourceRegistry.GetResourceInformation(dialog.ServiceResource, cancellationToken);
+        if (serviceResourceInformation is null)
+        {
+            _domainContext.AddError(new DomainFailure(nameof(DialogEntity.Org),
+                "Cannot find service owner organization shortname for referenced service resource."));
+        }
+        else
+        {
+            dialog.Org = serviceResourceInformation.OwnOrgShortName;
+        }
+
+        var dialogId = await GetExistingDialogIdByIdempotentKey(dialog, cancellationToken);
+        if (dialogId is not null)
+        {
+            return new Conflict(nameof(DialogEntity.IdempotentKey),
+                $"'{dialog.IdempotentKey}' already exists with DialogId '{dialogId}'");
+        }
+
+        if (!request.IsSilentUpdate && !_userResourceRegistry.IsCurrentUserServiceOwnerAdmin())
+        {
+            ValidateTimeFields(request.Dto);
+        }
+
+        CreateDialogEndUserContext(request, dialog);
+        CreateDialogServiceOwnerContext(request, dialog);
+
+        var activityTypes = request.Dto.Activities
+            .Select(x => x.Type)
+            .Distinct();
+
+        if (!ActivityTypeAuthorization.UsingAllowedActivityTypes(activityTypes, _user, out var errorMessage))
+        {
+            return new Forbidden(errorMessage);
+        }
+
+        dialog.HasUnopenedContent = DialogUnopenedContent.HasUnopenedContent(dialog, serviceResourceInformation);
+        _transmissionHierarchyValidator.ValidateWholeAggregate(dialog);
+
+        var duplicatedKeys = dialog.Transmissions
+            .Select(x => x.IdempotentKey)
+            .OfType<string>()
+            .GroupBy(x => x)
+            .Where(x => x.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+
+        if (duplicatedKeys.Count != 0)
+        {
+            var conflictingKeys = string.Join(", ", duplicatedKeys.Select(x => $"'{x}'"));
+            return new Conflict(nameof(DialogTransmission.IdempotentKey),
+                $"Duplicate IdempotentKey detected in dialog transmissions. Conflicting keys: {conflictingKeys}.");
+        }
+
+        var (fromParty, fromServiceOwner) = dialog.Transmissions.GetTransmissionCounts();
+        dialog.FromPartyTransmissionsCount = checked((short)fromParty);
+        dialog.FromServiceOwnerTransmissionsCount = checked((short)fromServiceOwner);
+
+        if (dialog.Transmissions.ContainsTransmissionByEndUser())
+        {
+            _systemLabelAdder.AddSystemLabel(dialog, SystemLabel.Values.Sent);
+        }
+
+        _db.Dialogs.Add(dialog);
+
+        var saveResult = await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return saveResult.Match<CreateDialogResult>(
+            success => new CreateDialogSuccess(dialog.Id, dialog.Revision),
+            domainError => domainError,
+            concurrencyError => throw new UnreachableException("Should never get a concurrency error when creating a new dialog"),
+            conflict => conflict);
+    }
+    private void ValidateTimeFields(CreateDialogDto dto)
+    {
+        const string errorMessage = "Must be in the future";
+
+        var clockUtcNow = _clock.UtcNowOffset;
+
+        if (dto.DueAt.HasValue && dto.DueAt <= clockUtcNow)
+        {
+            _domainContext.AddError(nameof(CreateDialogCommand.Dto.DueAt), errorMessage);
+        }
+
+        if (dto.ExpiresAt.HasValue && dto.ExpiresAt <= clockUtcNow)
+        {
+            _domainContext.AddError(nameof(CreateDialogCommand.Dto.ExpiresAt), errorMessage);
+        }
+
+        if (dto.VisibleFrom.HasValue && dto.VisibleFrom <= clockUtcNow)
+        {
+            _domainContext.AddError(nameof(CreateDialogCommand.Dto.VisibleFrom), errorMessage);
+        }
+    }
+
+    private async Task<Guid?> GetExistingDialogIdByIdempotentKey(DialogEntity dialog, CancellationToken cancellationToken)
+    {
+        if (dialog.IdempotentKey is null || string.IsNullOrEmpty(dialog.Org))
+        {
+            return null;
+        }
+
+        var dialogId = await _db.Dialogs
+            .Where(x => x.Org == dialog.Org && x.IdempotentKey == dialog.IdempotentKey)
+            .Select(x => x.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return dialogId == Guid.Empty ? null : dialogId;
+    }
+
+    private void CreateDialogEndUserContext(CreateDialogCommand request, DialogEntity dialog)
+    {
+        dialog.EndUserContext = new();
+
+        if (!request.Dto.SystemLabel.HasValue)
+        {
+            // Adding default label
+            dialog.EndUserContext
+                .DialogEndUserContextSystemLabels
+                .Add(new());
+
+            return;
+        }
+
+        _systemLabelAdder.AddSystemLabel(dialog, request.Dto.SystemLabel.Value);
+    }
+
+    private static void CreateDialogServiceOwnerContext(CreateDialogCommand request, DialogEntity dialog)
+    {
+        dialog.ServiceOwnerContext = new();
+        if (request.Dto.ServiceOwnerContext?.ServiceOwnerLabels.Count > 0)
+        {
+            dialog.ServiceOwnerContext.ServiceOwnerLabels =
+                request.Dto.ServiceOwnerContext.ServiceOwnerLabels.ToDialogServiceOwnerLabels();
+        }
+    }
+}

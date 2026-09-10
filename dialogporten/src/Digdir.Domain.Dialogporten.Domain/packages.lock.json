@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "DeterministicGuids": {
+        "type": "Direct",
+        "requested": "[1.0.11, )",
+        "resolved": "1.0.11",
+        "contentHash": "wEhcv8QYNfxWG2mMByiOcqQY+NOYgaDMAuj5Tygx2x6pUEVUPHwyHzktrhrO5ry58JRx9nZIzgpM/WX02Achug=="
+      },
+      "Microsoft.Extensions.DependencyInjection.Abstractions": {
+        "type": "Direct",
+        "requested": "[10.0.11, )",
+        "resolved": "10.0.11",
+        "contentHash": "/a1aJz4m7ylhEDf25ugQChLQoN5XwoGjWw/BoR/ZWWKsO1v4DdJElS1uyngahz4B/eOzjFk1KNTkarRLE5wsIg=="
+      },
+      "MediatR.Contracts": {
+        "type": "Transitive",
+        "resolved": "2.0.1",
+        "contentHash": "FYv95bNT4UwcNA+G/J1oX5OpRiSUxteXaUt2BJbRSdRNiIUNbggJF69wy6mnk2wYToaanpdXZdCwVylt96MpwQ=="
+      },
+      "Medo.Uuid7": {
+        "type": "Transitive",
+        "resolved": "3.2.0",
+        "contentHash": "18Gp47N8I7Vq319f5qTEdqX1GPOworXeNIjuxLN3Szqz96aMuORklGbnSllhEUmQZf3UWmp+X9pVDCKEf5zoaA=="
+      },
+      "digdir.library.entity.abstractions": {
+        "type": "Project",
+        "dependencies": {
+          "MediatR.Contracts": "[2.0.1, )",
+          "Medo.Uuid7": "[3.2.0, )"
+        }
+      }
+    }
+  }
+}

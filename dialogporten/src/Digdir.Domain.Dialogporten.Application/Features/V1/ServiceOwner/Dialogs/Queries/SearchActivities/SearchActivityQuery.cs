@@ -1,0 +1,66 @@
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.SearchActivities;
+
+public sealed class SearchActivityQuery : IRequest<SearchActivityResult>, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid DialogId { get; set; }
+}
+
+[GenerateOneOf]
+public sealed partial class SearchActivityResult : OneOfBase<List<ActivityDto>, EntityNotFound, EntityDeleted>;
+
+internal sealed class SearchActivityQueryHandler : IRequestHandler<SearchActivityQuery, SearchActivityResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUserResourceRegistry _userResourceRegistry;
+
+    public SearchActivityQueryHandler(IDialogDbContext db, IUserResourceRegistry userResourceRegistry)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(userResourceRegistry);
+
+        _db = db;
+        _userResourceRegistry = userResourceRegistry;
+    }
+
+    public async Task<SearchActivityResult> Handle(SearchActivityQuery request, CancellationToken cancellationToken)
+    {
+        var resourceIds = await _userResourceRegistry.GetCurrentUserResourceIds(cancellationToken);
+
+        var dialog = await _db.WrapWithRepeatableRead((dbCtx, ct) =>
+            dbCtx.Dialogs
+                .AsNoTracking()
+                .Include(x => x.Activities)
+                .IgnoreQueryFilters()
+                .WhereIf(!_userResourceRegistry.IsCurrentUserServiceOwnerAdmin(),
+                    x => resourceIds.Contains(x.ServiceResource))
+                .FirstOrDefaultAsync(x => x.Id == request.DialogId,
+                    cancellationToken: ct),
+            cancellationToken);
+
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.DialogId);
+        }
+
+        if (dialog.Deleted)
+        {
+            return new EntityDeleted<DialogEntity>(request.DialogId);
+        }
+
+        return dialog.Activities
+            .OrderBy(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
+            .Select(x => x.ToDto())
+            .ToList();
+    }
+}

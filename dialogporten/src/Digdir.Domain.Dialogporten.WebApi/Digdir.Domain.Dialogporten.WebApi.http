@@ -1,0 +1,89 @@
+﻿@baseAddress = https://localhost:7214
+@dialogId = C1167463-730A-464A-87DD-50BB1D475F47
+@orgPartyPrefix = urn:altinn:organization:identifier-no::
+
+###############################################
+################### Enduser ###################
+###############################################
+
+GET {{baseAddress}}/api/v1/enduser/dialogs?Party={{orgPartyPrefix}}991825827&search=Hello&cultureCode=en_us
+
+###
+
+GET {{baseAddress}}/api/v1/enduser/dialogs/{{dialogId}}
+
+
+###############################################
+################ Serviceowner #################
+###############################################
+
+GET {{baseAddress}}/api/v1/serviceowner/dialogs?search=TAG1
+
+###
+
+GET {{baseAddress}}/api/v1/serviceowner/dialogs/{{dialogId}}
+
+###
+
+POST {{baseAddress}}/api/v1/serviceowner/dialogs
+Content-Type: application/json
+
+{
+  "Party": "{{orgPartyPrefix}}991825827",
+  "Id": "{{dialogId}}",
+  "ServiceResource": "urn:altinn:resource:super-simple-service",
+  "Status": "InProgress",
+  "Content": [
+      { "Type": "Title", "Value": [ { "LanguageCode": "en-us", "Value": "Hello world!" } ]},
+      { "Type": "Summary", "Value": [ { "LanguageCode": "NB_NO", "Value": "Dette er en oppsummering." } ]},
+      { "Type": "SenderName", "Value": [ { "LanguageCode": "NB_NO", "Value": "Jeg er meg og jeg har sendt" } ]},
+      { "Type": "AdditionalInfo", "Value": [ { "LanguageCode": "NB_NO", "Value": "Dette er en paragraf <p/>" } ]}
+  ]
+}
+
+###
+
+PUT {{baseAddress}}/api/v1/serviceowner/dialogs/{{dialogId}}
+Content-Type: application/json
+
+{
+  "Party": "{{orgPartyPrefix}}}}991825827",
+  "Id": "{{dialogId}}",
+  "ServiceResource": "urn:altinn:resource:super-simple-service",
+  "Status": "InProgress",
+  "Content": [
+      { "Type": "Title", "Value": [ { "LanguageCode": "NB_NO", "Value": "Hei verden!" } ]},
+      { "Type": "Summary", "Value": [ { "LanguageCode": "NB_NO", "Value": "Dette er en oppsummering." } ]},
+      { "Type": "SenderName", "Value": [ { "LanguageCode": "NB_NO", "Value": "Jeg er meg og jeg har sendt" } ]},
+      { "Type": "AdditionalInfo", "Value": [ { "LanguageCode": "NB_NO", "Value": "Dette er en paragref <p/>" } ]}
+  ],
+  "SearchTags": [
+    { "value": "tag1" },
+    { "value": "tag2" }
+  ]
+}
+
+###
+
+PATCH {{baseAddress}}/api/v1/serviceowner/dialogs/{{dialogId}}
+Content-Type: application/json
+
+[
+    {
+        "op": "replace",
+        "path": "/content/0/value/0",
+        "value": {
+            "LanguageCode": "en_US",
+            "Value": "Hello world!"
+        }
+    },
+    {
+        "op": "replace",
+        "path": "/content/1/value/0/value",
+        "value": "Ny oppsummering."
+    }
+]
+
+###
+
+DELETE {{baseAddress}}/api/v1/serviceowner/dialogs/{{dialogId}}

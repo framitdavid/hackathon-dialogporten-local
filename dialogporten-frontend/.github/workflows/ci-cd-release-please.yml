@@ -1,0 +1,68 @@
+# This workflow runs on every push to main and:
+# 1. Checks if a new release should be created (via release-please)
+# 2. If a release is created:
+# 2.1. Builds and publishes Docker images tagged with the new version
+#      (always, so the image tag for a released version always exists)
+# 2.2. Triggers staging and yt01 deployment via repository dispatch
+
+name: CI/CD Release Please
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: write
+
+jobs:
+  release-please:
+    name: Release please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      version: ${{ steps.release.outputs.major }}.${{ steps.release.outputs.minor }}.${{ steps.release.outputs.patch }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_PAT }}
+          release-type: node
+
+  publish:
+    name: Build and publish docker images
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/workflow-docker-build-and-push.yml
+    secrets:
+      GCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      dockerImageBaseName: ghcr.io/altinn/dialogporten-frontend-
+      version: ${{ needs.release-please.outputs.version }}
+
+  notify-release-created:
+    name: Notify release created
+    needs: [release-please, publish]
+    if: ${{ always() && !failure() && !cancelled() && needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify release created
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_PAT }}
+          event-type: release_created
+          client-payload: '{"version": "${{ needs.release-please.outputs.version }}"}'
+
+  send-slack-message-on-failure:
+    name: Send Slack message on failure
+    needs: [release-please, publish, notify-release-created]
+    if: ${{ always() && failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-send-ci-cd-status-slack-message.yml
+    with:
+      environment: release-please
+      docker_build_and_push_status: ${{ needs.publish.result }}
+      release_please_status: ${{ needs.release-please.result }}
+      notify_release_created_status: ${{ needs.notify-release-created.result }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID_FOR_CI_CD_STATUS }}

@@ -1,0 +1,68 @@
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.GetTransmission;
+using Digdir.Domain.Dialogporten.WebApi.Common;
+using Digdir.Domain.Dialogporten.WebApi.Common.Authorization;
+using Digdir.Domain.Dialogporten.WebApi.Common.Extensions;
+using Digdir.Domain.Dialogporten.WebApi.Common.Swagger;
+using Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.Common.Extensions;
+using FastEndpoints;
+using MediatR;
+using Constants = Digdir.Domain.Dialogporten.WebApi.Common.Constants;
+
+namespace Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.EndUser.Dialogs.Queries.GetTransmission;
+
+[OpenApiOperationId("GetDialogTransmission")]
+[OpenApiExtras(
+    scopes: [AuthorizationScope.EndUser],
+    securitySchemes: [OpenApiSecurityScheme.IdportenSecurityScheme, OpenApiSecurityScheme.MaskinportenSecurityScheme])
+]
+public sealed class GetDialogTransmissionEndpoint : Endpoint<GetTransmissionRequest, TransmissionDto>
+{
+    private readonly ISender _sender;
+
+    public GetDialogTransmissionEndpoint(ISender sender)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        _sender = sender;
+    }
+
+    public override void Configure()
+    {
+        Get("dialogs/{dialogId}/transmissions/{transmissionId}");
+        Policies(AuthorizationPolicy.EndUser);
+        Group<EndUserGroup>();
+
+        Description(b => b.ProducesOneOf<TransmissionDto>(
+            StatusCodes.Status200OK,
+            StatusCodes.Status410Gone,
+            StatusCodes.Status404NotFound));
+    }
+
+    public override async Task HandleAsync(GetTransmissionRequest req, CancellationToken ct)
+    {
+        var query = new GetTransmissionQuery
+        {
+            DialogId = req.DialogId,
+            TransmissionId = req.TransmissionId,
+            AcceptedLanguages = req.AcceptedLanguages?.AcceptedLanguage
+        };
+        var result = await _sender.Send(query, ct);
+        await result.Match(
+            dto => Send.OkAsync(dto, ct),
+            notFound => this.NotFoundAsync(notFound, ct),
+            deleted => this.GoneAsync(deleted, ct),
+            forbidden => this.ForbiddenAsync(forbidden, ct));
+    }
+}
+
+[OpenApiTypeName("GetDialogTransmissionRequest")]
+public sealed class GetTransmissionRequest
+{
+    public Guid DialogId { get; set; }
+    public Guid TransmissionId { get; set; }
+
+    [FromHeader(Constants.AcceptLanguage, isRequired: false)]
+    public AcceptedLanguages? AcceptedLanguages { get; set; } = null;
+}

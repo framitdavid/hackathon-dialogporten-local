@@ -1,0 +1,35 @@
+name: Build and test .NET
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build-and-test:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: ./global.json
+          # Safe with RestorePackagesWithLockFile: the lock files are the cache key, and
+          # `restore --locked-mode` below still fails if resolution drifts from them.
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test --filter FullyQualifiedName\!~E2E --no-build --configuration Release

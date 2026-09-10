@@ -1,0 +1,15 @@
+{
+  "name": "fastify-graphiql",
+  "main": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "fastify": "catalog:",
+    "fastify-plugin": "catalog:"
+  },
+  "type": "module",
+  "devDependencies": {
+    "vitest": "catalog:"
+  }
+}

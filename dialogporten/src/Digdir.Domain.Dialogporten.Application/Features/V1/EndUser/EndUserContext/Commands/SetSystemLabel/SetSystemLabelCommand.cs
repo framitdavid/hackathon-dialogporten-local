@@ -1,0 +1,95 @@
+using System.Data;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Actors;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.SetSystemLabel;
+
+public sealed class SetSystemLabelCommand : IRequest<SetSystemLabelResult>, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid DialogId { get; set; }
+    public Guid? IfMatchEndUserContextRevision { get; set; }
+    public IReadOnlyCollection<SystemLabel.Values> AddLabels { get; set; } = [];
+    public IReadOnlyCollection<SystemLabel.Values> RemoveLabels { get; set; } = [];
+}
+
+public sealed record SetSystemLabelSuccess(Guid Revision);
+
+[GenerateOneOf]
+public sealed partial class SetSystemLabelResult : OneOfBase<SetSystemLabelSuccess, EntityNotFound, Forbidden, EntityDeleted, DomainError, ValidationError, ConcurrencyError, Conflict>;
+
+internal sealed class SetSystemLabelCommandHandler : IRequestHandler<SetSystemLabelCommand, SetSystemLabelResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IUserRegistry _userRegistry;
+    private readonly IAltinnAuthorization _altinnAuthorization;
+
+    public SetSystemLabelCommandHandler(IDialogDbContext db, IUnitOfWork unitOfWork, IUserRegistry userRegistry, IAltinnAuthorization altinnAuthorization)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(userRegistry);
+        ArgumentNullException.ThrowIfNull(altinnAuthorization);
+
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _userRegistry = userRegistry;
+        _altinnAuthorization = altinnAuthorization;
+    }
+
+    public async Task<SetSystemLabelResult> Handle(SetSystemLabelCommand request, CancellationToken cancellationToken)
+    {
+        await _unitOfWork.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+
+        var dialog = await _db.Dialogs
+            .Include(x => x.EndUserContext)
+                .ThenInclude(x => x.DialogEndUserContextSystemLabels)
+            .Include(x => x.ServiceOwnerContext)
+                .ThenInclude(x => x.ServiceOwnerLabels)
+            .FirstOrDefaultAsync(x => x.Id == request.DialogId, cancellationToken: cancellationToken);
+
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.DialogId);
+        }
+
+        if (dialog.Deleted)
+        {
+            return new EntityDeleted<DialogEntity>(request.DialogId);
+        }
+
+        if (!await _altinnAuthorization.HasListAuthorizationForDialog(dialog, cancellationToken))
+        {
+            return new Forbidden().WithInvalidDialogIds([request.DialogId]);
+        }
+
+        if (request.IfMatchEndUserContextRevision is { } revision && revision != dialog.EndUserContext.Revision)
+        {
+            return new ConcurrencyError();
+        }
+
+        var currentUserInformation = await _userRegistry.GetCurrentUserInformation(cancellationToken);
+        var performedBy = LabelAssignmentLogActorFactory.FromUserInformation(currentUserInformation);
+
+        dialog.EndUserContext.UpdateSystemLabels(request.AddLabels, request.RemoveLabels, performedBy);
+
+        var saveResult = await _unitOfWork
+                               .EnableConcurrencyCheck(dialog.EndUserContext, request.IfMatchEndUserContextRevision)
+                               .SaveChangesAsync(cancellationToken);
+
+        return saveResult.Match<SetSystemLabelResult>(
+            _ => new SetSystemLabelSuccess(dialog.EndUserContext.Revision),
+            domainError => domainError,
+            concurrencyError => concurrencyError,
+            conflict => conflict);
+    }
+}

@@ -1,0 +1,504 @@
+﻿using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.DataLoader;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions.Enumerables;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.Presentation;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.DialogStatuses;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.SystemLabelAdder;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Common;
+using Digdir.Domain.Dialogporten.Domain.Attachments;
+using Digdir.Domain.Dialogporten.Domain.Common;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Actions;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Activities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Transmissions;
+using Digdir.Library.Entity.Abstractions.Features.Identifiable;
+using MediatR;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Update;
+
+public sealed class UpdateDialogCommand : IRequest<UpdateDialogResult>, ISilentUpdater, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid Id { get; set; }
+    public Guid? IfMatchDialogRevision { get; set; }
+    public UpdateDialogDto Dto { get; set; } = null!;
+    public bool IsSilentUpdate { get; set; }
+
+    Guid IFeatureMetricServiceResourceThroughDialogIdRequest.DialogId => Id;
+}
+
+[GenerateOneOf]
+public sealed partial class UpdateDialogResult : OneOfBase<UpdateDialogSuccess, EntityNotFound, EntityDeleted, ValidationError, Forbidden, DomainError, ConcurrencyError, Conflict>;
+
+public sealed record UpdateDialogSuccess(Guid Revision);
+
+internal sealed class UpdateDialogCommandHandler : IRequestHandler<UpdateDialogCommand, UpdateDialogResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUser _user;
+    private readonly IClock _clock;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IDomainContext _domainContext;
+    private readonly ISystemLabelAdder _systemLabelAdder;
+    private readonly IUserResourceRegistry _userResourceRegistry;
+    private readonly IResourceRegistry _resourceRegistry;
+    private readonly IServiceResourceAuthorizer _serviceResourceAuthorizer;
+    private readonly IDataLoaderContext _dataLoaderContext;
+    private readonly IDialogTransmissionAppender _dialogTransmissionAppender;
+    private readonly ITransmissionHierarchyValidator _transmissionHierarchyValidator;
+
+    public UpdateDialogCommandHandler(
+        IDialogDbContext db,
+        IUser user,
+        IClock clock,
+        IUnitOfWork unitOfWork,
+        IDomainContext domainContext,
+        ISystemLabelAdder systemLabelAdder,
+        IUserResourceRegistry userResourceRegistry,
+        IResourceRegistry resourceRegistry,
+        IServiceResourceAuthorizer serviceResourceAuthorizer,
+        IDataLoaderContext dataLoaderContext,
+        IDialogTransmissionAppender dialogTransmissionAppender,
+        ITransmissionHierarchyValidator transmissionHierarchyValidator
+    )
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(clock);
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(domainContext);
+        ArgumentNullException.ThrowIfNull(userResourceRegistry);
+        ArgumentNullException.ThrowIfNull(resourceRegistry);
+        ArgumentNullException.ThrowIfNull(serviceResourceAuthorizer);
+        ArgumentNullException.ThrowIfNull(dataLoaderContext);
+        ArgumentNullException.ThrowIfNull(systemLabelAdder);
+        ArgumentNullException.ThrowIfNull(dialogTransmissionAppender);
+        ArgumentNullException.ThrowIfNull(transmissionHierarchyValidator);
+
+        _user = user;
+        _clock = clock;
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _domainContext = domainContext;
+        _userResourceRegistry = userResourceRegistry;
+        _resourceRegistry = resourceRegistry;
+        _serviceResourceAuthorizer = serviceResourceAuthorizer;
+        _dataLoaderContext = dataLoaderContext;
+        _dialogTransmissionAppender = dialogTransmissionAppender;
+        _transmissionHierarchyValidator = transmissionHierarchyValidator;
+        _systemLabelAdder = systemLabelAdder;
+    }
+
+    public async Task<UpdateDialogResult> Handle(UpdateDialogCommand request, CancellationToken cancellationToken)
+    {
+        var dialog = UpdateDialogDataLoader.GetPreloadedData(_dataLoaderContext);
+
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.Id);
+        }
+
+        if (dialog.Deleted)
+        {
+            // TODO: https://github.com/altinn/dialogporten/issues/1543
+            // When restoration is implemented, add a hint to the error message.
+            return new EntityDeleted<DialogEntity>(request.Id);
+        }
+
+        var isCurrentUserServiceOwnerAdmin = _userResourceRegistry.IsCurrentUserServiceOwnerAdmin();
+        if (dialog.Frozen && !isCurrentUserServiceOwnerAdmin)
+        {
+            return new Forbidden("User cannot modify frozen dialog");
+        }
+
+        if (request.IfMatchDialogRevision is { } revision && revision != dialog.Revision)
+        {
+            return new ConcurrencyError();
+        }
+
+        // Update primitive properties
+        request.Dto.MapPrimitivesTo(dialog);
+        dialog.StatusId = request.Dto.Status.ToDialogStatusValue();
+
+        if (!request.IsSilentUpdate && !isCurrentUserServiceOwnerAdmin)
+        {
+            ValidateTimeFields(dialog);
+        }
+
+        AppendActivity(dialog, request.Dto);
+
+        var activityTypes = request.Dto.Activities
+            .Select(x => x.Type)
+            .Distinct();
+
+        if (!ActivityTypeAuthorization.UsingAllowedActivityTypes(activityTypes, _user, out var errorMessage))
+        {
+            return new Forbidden(errorMessage);
+        }
+
+        await AppendTransmission(dialog, request.Dto, cancellationToken);
+
+        var duplicatedKeys = dialog.Transmissions
+            .Select(x => x.IdempotentKey)
+            .OfType<string>()
+            .GroupBy(t => t)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+
+        if (duplicatedKeys.Count != 0)
+        {
+            var conflictingKeys = string.Join(", ", duplicatedKeys.Select(x => $"'{x}'"));
+            return new Conflict(nameof(DialogTransmission.IdempotentKey),
+                $"Duplicate IdempotentKey detected in dialog transmissions. Conflicting keys: {conflictingKeys}.");
+        }
+
+        _transmissionHierarchyValidator.ValidateWholeAggregate(dialog);
+
+        VerifyActivityTransmissionRelations(dialog);
+
+        dialog.SearchTags
+            .Merge(request.Dto.SearchTags,
+                destinationKeySelector: x => x.Value,
+                sourceKeySelector: x => x.Value,
+                create: Mappers.ToDialogSearchTags,
+                delete: DeleteDelegate.Default,
+                comparer: StringComparer.InvariantCultureIgnoreCase);
+
+        dialog.Attachments
+            .Merge(request.Dto.Attachments,
+                destinationKeySelector: x => x.Id,
+                sourceKeySelector: x => x.Id,
+                create: CreateAttachments,
+                update: UpdateAttachments,
+                delete: DeleteDelegate.Default);
+
+        dialog.GuiActions
+            .Merge(request.Dto.GuiActions,
+                destinationKeySelector: x => x.Id,
+                sourceKeySelector: x => x.Id,
+                create: CreateGuiActions,
+                update: UpdateGuiActions,
+                delete: DeleteDelegate.Default);
+
+        dialog.ApiActions
+            .Merge(request.Dto.ApiActions,
+                destinationKeySelector: x => x.Id,
+                sourceKeySelector: x => x.Id,
+                create: CreateApiActions,
+                update: UpdateApiActions,
+                delete: DeleteDelegate.Default);
+
+        var serviceResourceAuthorizationResult = await _serviceResourceAuthorizer.AuthorizeServiceResources(dialog, cancellationToken);
+        if (serviceResourceAuthorizationResult.Value is Forbidden forbiddenResult)
+        {
+            // Ignore the domain context errors, as they are not relevant when returning Forbidden.
+            _domainContext.Pop();
+            return forbiddenResult;
+        }
+
+        var serviceResourceInformation = await _resourceRegistry.GetResourceInformation(dialog.ServiceResource, cancellationToken);
+        dialog.HasUnopenedContent = DialogUnopenedContent.HasUnopenedContent(dialog, serviceResourceInformation);
+
+        if (!request.IsSilentUpdate)
+        {
+            _systemLabelAdder.AddSystemLabel(dialog, SystemLabel.Values.Default);
+        }
+
+        var saveResult = await _unitOfWork
+            .EnableConcurrencyCheck(dialog, request.IfMatchDialogRevision)
+            .SaveChangesAsync(cancellationToken);
+
+        return saveResult.Match<UpdateDialogResult>(
+            success => new UpdateDialogSuccess(dialog.Revision),
+            domainError => domainError,
+            concurrencyError => concurrencyError,
+            conflict => conflict);
+    }
+
+    private void ValidateTimeFields(DialogAttachment attachment)
+    {
+        if (!_db.MustWhenModified(attachment,
+            propertyExpression: x => x.ExpiresAt,
+            predicate: x => x > _clock.UtcNowOffset || x == null))
+        {
+            _domainContext.AddError($"{nameof(UpdateDialogDto.Attachments)}." +
+                $"{nameof(AttachmentDto.ExpiresAt)}",
+                $"Must be in future, current value, or null. (Id: {attachment.Id})");
+            return;
+        }
+
+        if (!_db.MustWhenAdded(attachment,
+            propertyExpression: x => x.ExpiresAt,
+            predicate: x => x > _clock.UtcNowOffset || x == null))
+        {
+            var idString = attachment.Id == Guid.Empty ? string.Empty : $" (Id: {attachment.Id})";
+            _domainContext.AddError($"{nameof(UpdateDialogDto.Attachments)}." +
+                $"{nameof(AttachmentDto.ExpiresAt)}",
+                $"Must be in future or null, got '{attachment.ExpiresAt}'.{idString}");
+        }
+    }
+
+    private void ValidateTimeFields(DialogEntity dialog)
+    {
+        const string errorMessage = "Must be in future or current value.";
+
+        if (!_db.MustWhenModified(dialog,
+            propertyExpression: x => x.ExpiresAt,
+            predicate: x => x > _clock.UtcNowOffset))
+        {
+            _domainContext.AddError(nameof(UpdateDialogCommand.Dto.ExpiresAt), errorMessage);
+        }
+
+        if (!_db.MustWhenModified(dialog,
+            propertyExpression: x => x.DueAt,
+            predicate: x => x > _clock.UtcNowOffset || x == null))
+        {
+            _domainContext.AddError(nameof(UpdateDialogCommand.Dto.DueAt), errorMessage + " (Or null)");
+        }
+    }
+
+    private void AppendActivity(DialogEntity dialog, UpdateDialogDto dto)
+    {
+        var newDialogActivities = dto.Activities
+            .Select(x => x.ToDialogActivity())
+            .ToList();
+
+        var existingIds = _db.DialogActivities
+            .Local
+            .Select(x => x.Id)
+            .Intersect(newDialogActivities.Select(x => x.Id))
+            .ToArray();
+
+        if (existingIds.Length != 0)
+        {
+            _domainContext.AddError(DomainFailure.EntityExists<DialogActivity>(existingIds));
+            return;
+        }
+
+        dialog.Activities.AddRange(newDialogActivities);
+
+        // Tell ef explicitly to add activities as new to the database.
+        _db.DialogActivities.AddRange(newDialogActivities);
+    }
+
+    private void VerifyActivityTransmissionRelations(DialogEntity dialog)
+    {
+        var relatedTransmissionIds = dialog.Activities
+            .Where(x => x.TransmissionId is not null)
+            .Select(x => x.TransmissionId)
+            .ToList();
+
+        if (relatedTransmissionIds.Count == 0)
+        {
+            return;
+        }
+
+        var transmissionIds = dialog.Transmissions.Select(x => x.Id).ToList();
+
+        var invalidTransmissionIds = relatedTransmissionIds
+            .Where(id => !transmissionIds.Contains(id!.Value))
+            .ToList();
+
+        if (invalidTransmissionIds.Count != 0)
+        {
+            _domainContext.AddError(
+                nameof(UpdateDialogDto.Activities),
+                $"Invalid '{nameof(DialogActivity.TransmissionId)}, entity '{nameof(DialogTransmission)}'" +
+                $" with the following key(s) does not exist: ({string.Join(", ", invalidTransmissionIds)}) in '{nameof(dialog.Transmissions)}'");
+        }
+    }
+
+    private async Task AppendTransmission(DialogEntity dialog, UpdateDialogDto dto, CancellationToken cancellationToken)
+    {
+        var newDialogTransmissions = dto.Transmissions
+            .Select(x => x.ToDialogTransmission())
+            .ToList();
+
+        // Ensure transmissions, attachments and navigational actions have a UUIDv7 ID, needed for the
+        // transmission hierarchy validation and to guarantee deterministic order of input to output dtos.
+        newDialogTransmissions.Cast<IIdentifiableEntity>()
+            .Concat(newDialogTransmissions.SelectMany(x => x.Attachments))
+            .Concat(newDialogTransmissions.SelectMany(x => x.NavigationalActions))
+            .EnsureIds();
+
+        var existingIds = _db.DialogTransmissions
+            .Local
+            .Select(x => x.Id)
+            .Intersect(newDialogTransmissions.Select(x => x.Id))
+            .ToArray();
+
+        if (existingIds.Length != 0)
+        {
+            _domainContext.AddError(DomainFailure.EntityExists<DialogTransmission>(existingIds));
+            return;
+        }
+
+        var newAttachments = newDialogTransmissions
+            .SelectMany(x => x.Attachments)
+            .ToList();
+
+        var newAttachmentIds = newAttachments
+            .Select(x => x.Id);
+
+        var existingAttachmentIds = _db.DialogTransmissions
+            .Local
+            .SelectMany(x => x.Attachments)
+            .Select(x => x.Id)
+            .Intersect(newAttachmentIds)
+            .ToArray();
+
+        if (existingAttachmentIds.Length != 0)
+        {
+            _domainContext.AddError(DomainFailure.EntityExists<DialogAttachment>(existingAttachmentIds));
+            return;
+        }
+
+        var newNavigationalActionIds = newDialogTransmissions
+            .SelectMany(x => x.NavigationalActions)
+            .Select(x => x.Id);
+
+        var existingNavigationalActionIds = _db.DialogTransmissions
+            .Local
+            .SelectMany(x => x.NavigationalActions)
+            .Select(x => x.Id)
+            .Intersect(newNavigationalActionIds)
+            .ToArray();
+
+        if (existingNavigationalActionIds.Length != 0)
+        {
+            _domainContext.AddError(DomainFailure.EntityExists<DialogTransmissionNavigationalAction>(existingNavigationalActionIds));
+            return;
+        }
+
+        await _transmissionHierarchyValidator.ValidateNewTransmissionsAsync(
+            dialog.Id,
+            newDialogTransmissions,
+            cancellationToken);
+
+        var appendResult = _dialogTransmissionAppender.Append(dialog, newDialogTransmissions);
+
+        if (appendResult.ContainsEndUserTransmission)
+        {
+            _systemLabelAdder.AddSystemLabel(dialog, SystemLabel.Values.Sent);
+        }
+    }
+
+    private IEnumerable<DialogGuiAction> CreateGuiActions(IEnumerable<GuiActionDto> creatables)
+    {
+        var guiActions = creatables
+            .Select(x => x.ToDialogGuiAction())
+            .ToList();
+        _db.DialogGuiActions.AddRange(guiActions);
+        return guiActions;
+    }
+
+    private static void UpdateGuiActions(IEnumerable<UpdateSet<DialogGuiAction, GuiActionDto>> updateSets)
+    {
+        foreach (var (source, destination) in updateSets)
+        {
+            destination.UpdateFrom(source);
+        }
+    }
+
+    private IEnumerable<DialogApiAction> CreateApiActions(IEnumerable<ApiActionDto> creatables)
+    {
+        return creatables.Select(x =>
+        {
+            var apiAction = x.ToDialogApiAction();
+            _db.DialogApiActions.Add(apiAction);
+            return apiAction;
+        });
+    }
+
+    private void UpdateApiActions(IEnumerable<UpdateSet<DialogApiAction, ApiActionDto>> updateSets)
+    {
+        foreach (var (source, destination) in updateSets)
+        {
+            destination.UpdateFrom(source);
+
+            destination.Endpoints
+                .Merge(source.Endpoints,
+                    destinationKeySelector: x => x.Id,
+                    sourceKeySelector: x => x.Id,
+                    create: CreateApiActionEndpoint,
+                    update: UpdateApiActionEndpoints,
+                    delete: DeleteDelegate.Default);
+        }
+    }
+
+    private static void UpdateApiActionEndpoints(
+        IEnumerable<UpdateSet<DialogApiActionEndpoint, ApiActionEndpointDto>> updateSets)
+    {
+        foreach (var (source, destination) in updateSets)
+        {
+            destination.UpdateFrom(source);
+        }
+    }
+
+    private IEnumerable<DialogApiActionEndpoint> CreateApiActionEndpoint(IEnumerable<ApiActionEndpointDto> creatables)
+    {
+        foreach (var apiActionEndpointDto in creatables)
+        {
+            var apiActionEndpoint = apiActionEndpointDto.ToDialogApiActionEndpoint();
+            _db.DialogApiActionEndpoints.Add(apiActionEndpoint);
+            yield return apiActionEndpoint;
+        }
+    }
+
+    private IEnumerable<DialogAttachment> CreateAttachments(IEnumerable<AttachmentDto> creatables)
+    {
+        return creatables.Select(attachmentDto =>
+        {
+            var attachment = attachmentDto.ToDialogAttachment();
+            // Ensure attachments have a UUIDv7 ID, needed to guarantee deterministic order of input to output dtos.
+            attachment.EnsureId();
+            _db.DialogAttachments.Add(attachment);
+            ValidateTimeFields(attachment);
+            return attachment;
+        });
+    }
+
+    private void UpdateAttachments(IEnumerable<UpdateSet<DialogAttachment, AttachmentDto>> updateSets)
+    {
+        foreach (var updateSet in updateSets)
+        {
+            updateSet.Destination.UpdateFrom(updateSet.Source);
+            ValidateTimeFields(updateSet.Destination);
+            updateSet.Destination.Urls
+                .Merge(updateSet.Source.Urls,
+                    destinationKeySelector: x => x.Id,
+                    sourceKeySelector: x => x.Id,
+                    create: CreateAttachmentUrls,
+                    update: UpdateAttachmentUrls,
+                    delete: DeleteDelegate.Default);
+        }
+    }
+
+    private static void UpdateAttachmentUrls(IEnumerable<UpdateSet<AttachmentUrl, AttachmentUrlDto>> updateSets)
+    {
+        foreach (var (source, destination) in updateSets)
+        {
+            destination.UpdateFrom(source);
+        }
+    }
+
+    private IEnumerable<AttachmentUrl> CreateAttachmentUrls(IEnumerable<AttachmentUrlDto> creatables)
+    {
+        foreach (var dto in creatables)
+        {
+            var url = dto.ToAttachmentUrl();
+            _db.AttachmentUrls.Add(url);
+            yield return url;
+        }
+    }
+}

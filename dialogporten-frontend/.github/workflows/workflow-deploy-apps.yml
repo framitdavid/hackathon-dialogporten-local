@@ -1,0 +1,230 @@
+name: Deploy apps
+on:
+  workflow_call:
+    outputs:
+      deployment_executed:
+        description: "Indicates if the deployment was actually executed"
+        value: ${{ jobs.deploy-apps.result == 'success' && !inputs.dryRun }}
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: true
+      AZURE_RESOURCE_GROUP_NAME:
+        required: true
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME:
+        required: true
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME:
+        required: true
+      AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY:
+        required: true
+
+    inputs:
+      environment:
+        required: true
+        type: string
+      dryRun:
+        description: "If true, the deployment will be validated but not executed."
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: "Current version to use as tag"
+        required: true
+        type: string
+      runMigration:
+        description: "If true, the migration job will be deployed."
+        required: false
+        type: boolean
+        default: false
+      ref:
+        description: "The branch or tag ref to deploy. Using default checkout ref if not provided."
+        required: false
+        default: ${{ github.ref }}
+        type: string
+concurrency:
+  # Existing runs are cancelled if someone repeatedly commits to their own Pull Request (PR). However, it does not stop others' dry runs or actual deployments from the main branch.
+  # Also, the cancellation does not occur on merges to the main branch. Therefore, if multiple merges to main are performed simultaneously, they will just be queued up.
+  group: deploy-apps-${{ inputs.environment }}-${{ github.ref_name }}-${{ inputs.dryRun }}
+  # if the dryrun input is true, we want to cancel any running deployments in order to not block the pipeline e.g for environment approvals
+  cancel-in-progress: ${{ inputs.dryRun }}
+jobs:
+  deploy-migration-job:
+    name: Deploy migration job to ${{ inputs.environment }}
+    if: ${{ inputs.runMigration }}
+    # Self-hosted: repo-scoped ephemeral runner (Azure Container App Job).
+    # See Altinn/altinn-platform infrastructure/gh-runners/dialogporten-frontend.tf
+    runs-on: self-hosted
+    environment: ${{inputs.environment}}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: "Checkout GitHub Action"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Azure Login
+        uses: ./.github/actions/azure-login
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Dryrun Deploy migration job (${{ inputs.environment }})
+        uses: azure/bicep-deploy@66910e9c5c7733c33a1cd605030d02234b3bc4ed # v2.3.0
+        if: ${{inputs.dryRun}}
+        id: deploy-dryrun
+        env:
+          # parameters
+          IMAGE_TAG: ${{ inputs.version }}
+          # secrets
+          CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+          ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+        with:
+          scope: resourceGroup
+          operation: whatIf
+          type: deployment
+          template-file: ./.azure/applications/bff-migration-job/main.bicep
+          resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+          name: "dp-fe-${{ inputs.environment }}-bff-migration-job-${{ inputs.version }}"
+          parameters-file: ./.azure/applications/bff-migration-job/${{ inputs.environment }}.bicepparam
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy migration job (${{ inputs.environment }})
+        uses: azure/bicep-deploy@66910e9c5c7733c33a1cd605030d02234b3bc4ed # v2.3.0
+        if: ${{!inputs.dryRun}}
+        id: deploy
+        env:
+          # parameters
+          IMAGE_TAG: ${{ inputs.version }}
+          # secrets
+          CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+          ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+        with:
+          scope: resourceGroup
+          type: deployment
+          operation: create
+          template-file: ./.azure/applications/bff-migration-job/main.bicep
+          resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+          name: "dp-fe-${{ inputs.environment }}-bff-migration-job-${{ inputs.version }}"
+          parameters-file: ./.azure/applications/bff-migration-job/${{ inputs.environment }}.bicepparam
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start migration job
+        # No Docker daemon on self-hosted runners, so call az directly instead of
+        # the azure/CLI action (which executes the script inside a container).
+        # az is preinstalled and already authenticated by the Azure Login step above.
+        # Expressions are passed via env and referenced as quoted shell vars so
+        # workflow inputs can't be interpolated into the script (injection-safe).
+        if: ${{!inputs.dryRun}}
+        env:
+          JOB_NAME: ${{ steps.deploy.outputs.name }}
+          RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+        run: az containerapp job start -n "$JOB_NAME" -g "$RESOURCE_GROUP_NAME"
+
+      - name: Verify migration
+        if: ${{!inputs.dryRun}}
+        id: verify-migration
+        timeout-minutes: 3
+        env:
+          JOB_NAME: ${{ steps.deploy.outputs.name }}
+          RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+          VERSION: ${{ inputs.version }}
+        run: ./.github/tools/containerAppJobVerifier.sh "$JOB_NAME" "$RESOURCE_GROUP_NAME" "$VERSION"
+
+      - name: Logout from azure
+        if: ${{failure() || success()}}
+        continue-on-error: true
+        run: az logout
+
+  deploy-apps:
+    name: Deploy ${{ matrix.name }} to ${{ inputs.environment }}
+    # Self-hosted: repo-scoped ephemeral runner (Azure Container App Job).
+    # See Altinn/altinn-platform infrastructure/gh-runners/dialogporten-frontend.tf
+    runs-on: self-hosted
+    # Should run even though the migration job was skipped
+    if: ${{ always() && !cancelled() && !failure() }}
+    needs: deploy-migration-job
+    timeout-minutes: 6
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: bff
+          - name: frontend
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: "Checkout GitHub Action"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Azure Login
+        uses: ./.github/actions/azure-login
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Dryrun Deploy app ${{ matrix.name }}(${{ inputs.environment }})
+        uses: azure/bicep-deploy@66910e9c5c7733c33a1cd605030d02234b3bc4ed # v2.3.0
+        if: ${{inputs.dryRun}}
+        id: deploy-dryrun
+        env:
+          # parameters
+          IMAGE_TAG: ${{ inputs.version }}
+          # secrets
+          CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+          ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+          AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY: ${{ secrets.AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY }}
+        with:
+          scope: resourceGroup
+          type: deployment
+          operation: whatIf
+          template-file: ./.azure/applications/${{ matrix.name }}/main.bicep
+          resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+          name: dp-fe-${{ inputs.environment }}-${{ matrix.name }}-${{ inputs.version }}
+          parameters-file: ./.azure/applications/${{ matrix.name }}/${{ inputs.environment }}.bicepparam
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy app ${{ matrix.name }}(${{ inputs.environment }})
+        uses: azure/bicep-deploy@66910e9c5c7733c33a1cd605030d02234b3bc4ed # v2.3.0
+        if: ${{!inputs.dryRun}}
+        id: deploy
+        env:
+          # parameters
+          IMAGE_TAG: ${{ inputs.version }}
+          # secrets
+          CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+          ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+          AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY: ${{ secrets.AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY }}
+        with:
+          scope: resourceGroup
+          type: deployment
+          operation: create
+          template-file: ./.azure/applications/${{ matrix.name }}/main.bicep
+          resource-group-name: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+          name: dp-fe-${{ inputs.environment }}-${{ matrix.name }}-${{ inputs.version }}
+          parameters-file: ./.azure/applications/${{ matrix.name }}/${{ inputs.environment }}.bicepparam
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify deployment (${{ matrix.name }})
+        if: ${{!inputs.dryRun}}
+        id: verify-deployment
+        timeout-minutes: 6
+        env:
+          REVISION_NAME: ${{ steps.deploy.outputs.revisionName }}
+          RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+        run: ./.github/tools/revisionVerifier.sh "$REVISION_NAME" "$RESOURCE_GROUP_NAME"
+
+      - name: Logout from azure
+        if: ${{failure() || success()}}
+        continue-on-error: true
+        run: az logout

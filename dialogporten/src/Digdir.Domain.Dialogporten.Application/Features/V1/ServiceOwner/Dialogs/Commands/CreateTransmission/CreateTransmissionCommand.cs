@@ -1,0 +1,209 @@
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.SystemLabelAdder;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Common;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Transmissions;
+using Digdir.Library.Entity.Abstractions.Features.Identifiable;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.CreateTransmission;
+
+public sealed class CreateTransmissionCommand : IRequest<CreateTransmissionResult>, ISilentUpdater, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid DialogId { get; set; }
+    public Guid? IfMatchDialogRevision { get; set; }
+    public List<CreateTransmissionDto> Transmissions { get; set; } = [];
+    public bool IsSilentUpdate { get; set; }
+
+    Guid IFeatureMetricServiceResourceThroughDialogIdRequest.DialogId => DialogId;
+}
+
+[GenerateOneOf]
+public sealed partial class CreateTransmissionResult : OneOfBase<CreateTransmissionSuccess, EntityNotFound, EntityDeleted, ValidationError, Forbidden, DomainError, ConcurrencyError, Conflict>;
+
+public sealed record CreateTransmissionSuccess(Guid Revision, IReadOnlyCollection<Guid> TransmissionIds);
+
+internal sealed class CreateTransmissionCommandHandler : IRequestHandler<CreateTransmissionCommand, CreateTransmissionResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IDomainContext _domainContext;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IServiceResourceAuthorizer _serviceResourceAuthorizer;
+    private readonly IUserResourceRegistry _userResourceRegistry;
+    private readonly IDialogTransmissionAppender _dialogTransmissionAppender;
+    private readonly ITransmissionHierarchyValidator _transmissionHierarchyValidator;
+    private readonly ISystemLabelAdder _systemLabelAdder;
+
+    public CreateTransmissionCommandHandler(
+        IDialogDbContext db,
+        IDomainContext domainContext,
+        IUnitOfWork unitOfWork,
+        IServiceResourceAuthorizer serviceResourceAuthorizer,
+        IUserResourceRegistry userResourceRegistry,
+        IDialogTransmissionAppender dialogTransmissionAppender,
+        ITransmissionHierarchyValidator transmissionHierarchyValidator,
+        ISystemLabelAdder systemLabelAdder
+    )
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(domainContext);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(serviceResourceAuthorizer);
+        ArgumentNullException.ThrowIfNull(userResourceRegistry);
+        ArgumentNullException.ThrowIfNull(dialogTransmissionAppender);
+        ArgumentNullException.ThrowIfNull(transmissionHierarchyValidator);
+        ArgumentNullException.ThrowIfNull(systemLabelAdder);
+
+        _db = db;
+        _domainContext = domainContext;
+        _unitOfWork = unitOfWork;
+        _serviceResourceAuthorizer = serviceResourceAuthorizer;
+        _userResourceRegistry = userResourceRegistry;
+        _dialogTransmissionAppender = dialogTransmissionAppender;
+        _transmissionHierarchyValidator = transmissionHierarchyValidator;
+        _systemLabelAdder = systemLabelAdder;
+    }
+
+    public async Task<CreateTransmissionResult> Handle(CreateTransmissionCommand request, CancellationToken cancellationToken)
+    {
+        var dialog = await LoadDialogAsync(request.DialogId, cancellationToken);
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.DialogId);
+        }
+
+        if (dialog.Deleted)
+        {
+            return new EntityDeleted<DialogEntity>(request.DialogId);
+        }
+
+        if (dialog.Frozen && !_userResourceRegistry.IsCurrentUserServiceOwnerAdmin())
+        {
+            return new Forbidden("User cannot modify frozen dialog");
+        }
+
+        if (request.IfMatchDialogRevision is { } revision && revision != dialog.Revision)
+        {
+            return new ConcurrencyError();
+        }
+
+        // Map incoming DTOs to domain entities without loading existing transmissions.
+        var newTransmissions = request.Transmissions.Select(x => x.ToDialogTransmission()).ToList();
+
+        var conflict = await ValidateIdempotentKeys(dialog.Id, newTransmissions, cancellationToken);
+        if (conflict is not null)
+        {
+            return conflict;
+        }
+
+        foreach (var transmission in newTransmissions)
+        {
+            transmission.Id = transmission.Id.CreateVersion7IfDefault();
+            transmission.DialogId = dialog.Id;
+            transmission.Dialog = dialog;
+        }
+
+        await _transmissionHierarchyValidator.ValidateNewTransmissionsAsync(
+            dialog.Id,
+            newTransmissions,
+            cancellationToken);
+
+        var appendResult = _dialogTransmissionAppender.Append(dialog, newTransmissions);
+
+        if (appendResult.ContainsEndUserTransmission)
+        {
+            _systemLabelAdder.AddSystemLabel(dialog, SystemLabel.Values.Sent);
+        }
+
+        // Any service-owner transmission introduces unopened content, so mark the dialog accordingly.
+        if (appendResult.ContainsServiceOwnerTransmission)
+        {
+            dialog.HasUnopenedContent = true;
+        }
+
+        var authorizeResult = await _serviceResourceAuthorizer.AuthorizeServiceResources(dialog, cancellationToken);
+        if (authorizeResult.Value is Forbidden forbidden)
+        {
+            _domainContext.Pop();
+            return forbidden;
+        }
+
+        if (!request.IsSilentUpdate)
+        {
+            _systemLabelAdder.AddSystemLabel(dialog, SystemLabel.Values.Default);
+        }
+
+        var saveResult = await _unitOfWork
+            .EnableConcurrencyCheck(dialog, request.IfMatchDialogRevision)
+            .SaveChangesAsync(cancellationToken);
+
+        return saveResult.Match<CreateTransmissionResult>(
+            success => new CreateTransmissionSuccess(dialog.Revision, newTransmissions.Select(x => x.Id).ToArray()),
+            domainError => domainError,
+            concurrencyError => concurrencyError,
+            conflict => conflict);
+    }
+
+    private async Task<Conflict?> ValidateIdempotentKeys(Guid dialogId, List<DialogTransmission> newTransmissions,
+        CancellationToken cancellationToken)
+    {
+        var newIdempotentKeys = newTransmissions
+            .Select(x => x.IdempotentKey)
+            .OfType<string>()
+            .ToList();
+
+        if (newIdempotentKeys.Count == 0)
+        {
+            return null;
+        }
+
+        var existingIdempotentKeys = await _db.DialogTransmissions
+            .Where(x => x.DialogId == dialogId)
+            .Select(x => x.IdempotentKey)
+            .OfType<string>()
+            .Where(x => newIdempotentKeys.Contains(x))
+            .ToListAsync(cancellationToken);
+
+        var duplicatedIdempotentKeys = newIdempotentKeys
+            .Concat(existingIdempotentKeys)
+            .GroupBy(x => x)
+            .Where(x => x.Count() > 1)
+            .Select(x => x.Key)
+            .ToList();
+
+        if (duplicatedIdempotentKeys.Count == 0)
+        {
+            return null;
+        }
+
+        var conflictingKeys = string.Join(", ", duplicatedIdempotentKeys.Select(x => $"'{x}'"));
+        return new Conflict(nameof(DialogTransmission.IdempotentKey),
+            $"Duplicate IdempotentKey detected in dialog transmissions. Conflicting keys: {conflictingKeys}.");
+    }
+
+    private async Task<DialogEntity?> LoadDialogAsync(Guid dialogId, CancellationToken cancellationToken)
+    {
+        var isAdmin = _userResourceRegistry.IsCurrentUserServiceOwnerAdmin();
+        var org = string.Empty;
+        if (!isAdmin)
+        {
+            org = await _userResourceRegistry.GetCurrentUserOrgShortName(cancellationToken);
+        }
+
+        return await _db.Dialogs
+            .Include(x => x.EndUserContext)
+            .ThenInclude(x => x.DialogEndUserContextSystemLabels)
+            .IgnoreQueryFilters()
+            .WhereIf(!isAdmin, x => x.Org == org)
+            .FirstOrDefaultAsync(x => x.Id == dialogId, cancellationToken);
+    }
+}

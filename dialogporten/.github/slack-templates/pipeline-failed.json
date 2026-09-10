@@ -1,0 +1,55 @@
+{
+  "channel": "${{ env.CHANNEL_ID }}",
+  "attachments": [
+    {
+      "color": "#FF0000",
+      "blocks": [
+        {
+          "type": "header",
+          "text": {
+            "type": "plain_text",
+            "text": "Github pipeline status",
+            "emoji": true
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Environment:* ${{ env.ENVIRONMENT }}"
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "*Job Status:*\n• Infrastructure: ${{ env.INFRA_STATUS }}\n• Apps: ${{ env.APPS_STATUS }}\n• E2E Tests: ${{ env.E2E_TESTS_STATUS }}\n• GraphQL E2E Tests: ${{ env.GRAPHQL_E2E_TESTS_STATUS }}\n• WebAPI E2E Tests: ${{ env.WEBAPI_E2E_TESTS_STATUS }}\n• Performance Tests: ${{ env.PERFORMANCE_TESTS_STATUS }}\n• Publish: ${{ env.PUBLISH_STATUS }}"
+          }
+        },
+        {
+          "type": "section",
+          "text": {
+            "type": "mrkdwn",
+            "text": "Please check the workflow for more details."
+          }
+        },
+        {
+          "type": "divider"
+        },
+        {
+          "type": "actions",
+          "elements": [
+            {
+              "type": "button",
+              "text": {
+                "type": "plain_text",
+                "text": "View Run"
+              },
+              "url": "${{ env.RUN_URL }}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# Lokal overstyring for kjøring mot LocalTest-testbrukere.
+# Docker Compose laster denne filen automatisk. Slett den for å gå tilbake til
+# Dialogportens hardkodede lokale bruker (pid 03886595947).
+#
+# Krever patchen i LocalDevelopmentUser.cs (branch local/localtest-pid), som gjør
+# pid-en konfigurerbar. Verdien må ha gyldig mod-11-kontrollsiffer, ellers
+# resolver ikke Dialogporten noen part.
+#
+# LocalTest-testbrukere med gyldig fnr (testdata/Register/Party/):
+#   510001  01899699552  Pengelens Partner
+#   510002  17858296439  Gjentagende Forelder
+#   510003  08829698278  Rik Forelder
+services:
+  dialogporten-graphql:
+    environment:
+      - LocalDevelopment__Pid=${LOCALTEST_PID:-01899699552}
+
+  dialogporten-webapi:
+    environment:
+      - LocalDevelopment__Pid=${LOCALTEST_PID:-01899699552}

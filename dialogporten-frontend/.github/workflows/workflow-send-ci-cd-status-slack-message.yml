@@ -1,0 +1,100 @@
+name: Send CI/CD Status Slack Message
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      infra_status:
+        type: string
+        description: "Status of the infrastructure deployment job"
+        default: "skipped"
+      apps_status:
+        type: string
+        description: "Status of the apps deployment job"
+        default: "skipped"
+      docker_build_and_push_status:
+        type: string
+        description: "Status of the docker image publishing job"
+        default: "skipped"
+      build_and_test_status:
+        type: string
+        description: "Status of the build and test job"
+        default: "skipped"
+      source_maps_upload_status:
+        type: string
+        description: "Status of the source maps upload job"
+        default: "skipped"
+      publish_node_logger_to_npm_status:
+        type: string
+        description: "Status of the publish node logger to npm job"
+        default: "skipped"
+      release_please_status:
+        type: string
+        description: "Status of the release please job"
+        default: "skipped"
+      notify_release_created_status:
+        type: string
+        description: "Status of the notify release created job"
+        default: "skipped"
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+      SLACK_CHANNEL_ID:
+        required: true
+
+jobs:
+  send-slack-message:
+    name: Send Slack message
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Determine status emojis
+        id: status-emojis
+        run: |
+          determine_emoji() {
+            local -A emoji_map=(
+              [success]=":white_check_mark:"
+              [failure]=":x:"
+              [cancelled]=":warning:"
+              [skipped]=":ballot_box_with_check:"
+            )
+            echo "${emoji_map[$1]:-Invalid status: $1}"
+          }
+
+          {
+            echo "INFRA_EMOJI=$(determine_emoji "${{ inputs.infra_status }}")"
+            echo "APPS_EMOJI=$(determine_emoji "${{ inputs.apps_status }}")"
+            echo "BUILD_AND_TEST_EMOJI=$(determine_emoji "${{ inputs.build_and_test_status }}")"
+            echo "SOURCE_MAPS_UPLOAD_EMOJI=$(determine_emoji "${{ inputs.source_maps_upload_status }}")"
+            echo "DOCKER_BUILD_AND_PUSH_EMOJI=$(determine_emoji "${{ inputs.docker_build_and_push_status }}")"
+            echo "PUBLISH_NODE_LOGGER_TO_NPM_EMOJI=$(determine_emoji "${{ inputs.publish_node_logger_to_npm_status }}")"
+            echo "RELEASE_PLEASE_EMOJI=$(determine_emoji "${{ inputs.release_please_status }}")"
+            echo "NOTIFY_RELEASE_CREATED_EMOJI=$(determine_emoji "${{ inputs.notify_release_created_status }}")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Send GitHub slack message
+        id: slack
+        env:
+          CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # statuses
+          INFRA_STATUS: "${{ steps.status-emojis.outputs.INFRA_EMOJI }}"
+          APPS_STATUS: "${{ steps.status-emojis.outputs.APPS_EMOJI }}"
+          BUILD_AND_TEST_STATUS: "${{ steps.status-emojis.outputs.BUILD_AND_TEST_EMOJI }}"
+          SOURCE_MAPS_UPLOAD_STATUS: "${{ steps.status-emojis.outputs.SOURCE_MAPS_UPLOAD_EMOJI }}"
+          DOCKER_BUILD_AND_PUSH_STATUS: "${{ steps.status-emojis.outputs.DOCKER_BUILD_AND_PUSH_EMOJI }}"
+          PUBLISH_NODE_LOGGER_TO_NPM_STATUS: "${{ steps.status-emojis.outputs.PUBLISH_NODE_LOGGER_TO_NPM_EMOJI }}"
+          RELEASE_PLEASE_STATUS: "${{ steps.status-emojis.outputs.RELEASE_PLEASE_EMOJI }}"
+          NOTIFY_RELEASE_CREATED_STATUS: "${{ steps.status-emojis.outputs.NOTIFY_RELEASE_CREATED_EMOJI }}"
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          errors: true
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload-templated: true
+          payload-file-path: "./.github/slack-templates/pipeline-failed.json"

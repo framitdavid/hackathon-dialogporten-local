@@ -1,0 +1,17 @@
+import { expect, test } from '@playwright/test';
+import { defaultAppURL } from '../';
+
+test.describe('Language picker', () => {
+  test('Check language picker functionality and query', async ({ page }) => {
+    await page.goto(defaultAppURL);
+
+    const listItem = page.getByRole('listitem').filter({ hasText: 'Melding om bortkjøring av snø' });
+    await expect(listItem).toContainText('Oslo kommune til Test Testesen');
+
+    await page.getByRole('button', { name: 'Meny', exact: true }).click();
+    await page.getByRole('navigation', { name: 'Menu' }).getByLabel('Språk/language').click();
+    await page.getByRole('menuitemradio', { name: 'English' }).click();
+    await expect(page.getByRole('link', { name: 'Notification of snow removal' })).toBeVisible();
+    await expect(page.getByRole('banner')).toContainText('Search');
+  });
+});

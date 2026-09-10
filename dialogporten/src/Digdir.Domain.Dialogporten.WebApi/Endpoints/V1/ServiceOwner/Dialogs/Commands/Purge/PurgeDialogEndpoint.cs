@@ -1,0 +1,75 @@
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Purge;
+using Digdir.Domain.Dialogporten.WebApi.Common;
+using Digdir.Domain.Dialogporten.WebApi.Common.Authorization;
+using Digdir.Domain.Dialogporten.WebApi.Common.Extensions;
+using Digdir.Domain.Dialogporten.WebApi.Common.Swagger;
+using Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.Common.Extensions;
+using FastEndpoints;
+using MediatR;
+using Constants = Digdir.Domain.Dialogporten.WebApi.Common.Constants;
+
+namespace Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.ServiceOwner.Dialogs.Commands.Purge;
+
+[OpenApiOperationId("PurgeDialog")]
+[OpenApiExtras(
+    scopes: [AuthorizationScope.ServiceProvider],
+    securitySchemes: [OpenApiSecurityScheme.MaskinportenSecurityScheme])
+]
+public sealed class PurgeDialogEndpoint : Endpoint<PurgeDialogRequest>
+{
+    private readonly ISender _sender;
+
+    public PurgeDialogEndpoint(ISender sender)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        _sender = sender;
+    }
+
+    public override void Configure()
+    {
+        Post("dialogs/{dialogId}/actions/purge");
+        Policies(AuthorizationPolicy.ServiceProvider);
+        Group<ServiceOwnerGroup>();
+
+        Description(b => b
+            .Accepts<PurgeDialogRequest>()
+            .ProducesOneOf(
+            StatusCodes.Status204NoContent,
+            StatusCodes.Status404NotFound,
+            StatusCodes.Status409Conflict,
+            StatusCodes.Status412PreconditionFailed));
+    }
+
+    public override async Task HandleAsync(PurgeDialogRequest req, CancellationToken ct)
+    {
+        var command = new PurgeDialogCommand
+        {
+            DialogId = req.DialogId,
+            IfMatchDialogRevision = req.IfMatchDialogRevision,
+            IsSilentUpdate = req.IsSilentUpdate ?? false
+        };
+
+        var result = await _sender.Send(command, ct);
+        await result.Match(
+            success => Send.NoContentAsync(ct),
+            notFound => this.NotFoundAsync(notFound, ct),
+            forbidden => this.ForbiddenAsync(forbidden, ct),
+            concurrencyError => this.PreconditionFailed(ct),
+            validationError => this.BadRequestAsync(validationError, ct),
+            conflict => this.ConflictAsync(conflict, ct));
+    }
+}
+
+[OpenApiTypeName(nameof(PurgeDialogRequest))]
+public sealed class PurgeDialogRequest
+{
+    public Guid DialogId { get; init; }
+
+    [FromHeader(headerName: Constants.IfMatch, isRequired: false, removeFromSchema: true)]
+    public Guid? IfMatchDialogRevision { get; init; }
+
+    [HideFromDocs]
+    public bool? IsSilentUpdate { get; init; }
+}

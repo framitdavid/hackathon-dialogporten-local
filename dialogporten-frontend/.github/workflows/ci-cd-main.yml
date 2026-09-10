@@ -1,0 +1,231 @@
+name: CI/CD Main
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+  packages: write
+  id-token: write
+  security-events: write
+  pages: write
+  issues: write
+
+jobs:
+  generate-git-short-sha:
+    name: Generate git short sha
+    uses: ./.github/workflows/workflow-generate-git-short-sha.yml
+
+  get-current-version:
+    name: Get current version
+    uses: ./.github/workflows/workflow-get-current-version.yml
+
+  check-for-changes:
+    name: Check for changes
+    uses: ./.github/workflows/workflow-check-for-changes.yml
+
+  build-and-test:
+    uses: ./.github/workflows/workflow-build-and-test.yml
+    needs: [check-for-changes, get-current-version, generate-git-short-sha]
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasApplicationChanges == 'true' }}
+    with:
+      environment: test
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  docker-build-and-push:
+    name: Build and publish docker images
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasApplicationChanges == 'true' }}
+    uses: ./.github/workflows/workflow-docker-build-and-push.yml
+    needs:
+      [
+        check-for-changes,
+        generate-git-short-sha,
+        get-current-version,
+        build-and-test,
+      ]
+    # todo: only run this if necessary (i.e. the appropriate files have changed)
+    secrets:
+      GCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      dockerImageBaseName: ghcr.io/altinn/dialogporten-frontend-
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  update-manifests:
+    name: Update manifest image tags for at23
+    needs:
+      [
+        get-current-version,
+        generate-git-short-sha,
+        docker-build-and-push,
+        check-for-changes,
+      ]
+    if: ${{ always() && !failure() && !cancelled() && (github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasApplicationChanges == 'true') }}
+    uses: ./.github/workflows/workflow-dispatch-update-manifests.yml
+    with:
+      environment: at23
+      image_tag: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+    secrets:
+      MANIFESTS_PAT: ${{ secrets.MANIFESTS_PAT }}
+
+  deploy-documentation:
+    uses: ./.github/workflows/workflow-deploy-docs.yml
+
+  deploy-infrastructure:
+    uses: ./.github/workflows/workflow-deploy-infrastructure.yml
+    needs: [generate-git-short-sha, check-for-changes, get-current-version]
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasInfrastructureChanges == 'true' }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_NAME: ${{ secrets.AZURE_SOURCE_KEY_VAULT_NAME }}
+      AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP: ${{ secrets.AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP }}
+      AZURE_CERTIFICATE_KEY_VAULT_NAME: ${{ secrets.AZURE_CERTIFICATE_KEY_VAULT_NAME }}
+      AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY }}
+    with:
+      environment: test
+      region: norwayeast
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  upload-source-maps:
+    name: Upload source maps to Application Insights
+    needs:
+      [
+        get-current-version,
+        check-for-changes,
+        generate-git-short-sha,
+        build-and-test,
+      ]
+    if: ${{ always() && !failure() && !cancelled() && (github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasApplicationChanges == 'true') }}
+    uses: ./.github/workflows/workflow-upload-source-maps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_MAPS_STORAGE_ACCOUNT_NAME: ${{ secrets.AZURE_SOURCE_MAPS_STORAGE_ACCOUNT_NAME }}
+      AZURE_SOURCE_MAPS_CONTAINER_NAME: ${{ secrets.AZURE_SOURCE_MAPS_CONTAINER_NAME }}
+    with:
+      environment: test
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  deploy-apps:
+    name: Deploy apps to test
+    needs:
+      [
+        get-current-version,
+        check-for-changes,
+        generate-git-short-sha,
+        docker-build-and-push,
+        deploy-infrastructure,
+        upload-source-maps,
+      ]
+    # we want deployment of apps to be dependent on deployment of infrastructure, but if infrastructure is skipped, we still want to deploy the apps
+    if: ${{ always() && !failure() && !cancelled() && (github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasApplicationChanges == 'true') }}
+    uses: ./.github/workflows/workflow-deploy-apps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # todo: consider resolving these values in another way since they are created in the infra-step
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+      AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY: ${{ secrets.AZURE_APPLICATION_INSIGHTS_INSTRUMENTATION_KEY }}
+    with:
+      environment: test
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+      runMigration: ${{ github.event_name == 'workflow_dispatch' || needs.check-for-changes.outputs.hasMigrationChanges == 'true' }}
+
+  send-slack-message-on-failure:
+    name: Send Slack message on failure
+    needs:
+      [
+        build-and-test,
+        docker-build-and-push,
+        deploy-infrastructure,
+        upload-source-maps,
+        deploy-apps,
+      ]
+    if: ${{ always() && failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-send-ci-cd-status-slack-message.yml
+    with:
+      environment: test
+      build_and_test_status: ${{ needs.build-and-test.result }}
+      docker_build_and_push_status: ${{ needs.docker-build-and-push.result }}
+      infra_status: ${{ needs.deploy-infrastructure.result }}
+      source_maps_upload_status: ${{ needs.upload-source-maps.result }}
+      apps_status: ${{ needs.deploy-apps.result }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID_FOR_CI_CD_STATUS }}
+
+  send-deployment-to-swarmia:
+    name: Send deployment to Swarmia
+    if: ${{ always() && !failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-swarmia-deployment.yml
+    needs:
+      [
+        deploy-infrastructure,
+        deploy-apps,
+        get-current-version,
+        generate-git-short-sha,
+      ]
+    with:
+      app-name: arbeidsflate
+      environment: "test"
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+    secrets:
+      token: ${{ secrets.SWARMIA_DEPLOYMENTS_AUTHORIZATION }}
+
+  get-previous-deployed-sha:
+    name: Get previous deployed SHA for test
+    runs-on: self-hosted
+    environment: test
+    if: ${{ github.event_name == 'push' }}
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve watermark
+        id: resolve
+        env:
+          STORED_SHA: ${{ vars.LATEST_DEPLOYED_SHA }}
+          FALLBACK_SHA: ${{ github.event.before }}
+        run: |
+          if [[ -n "$STORED_SHA" ]]; then
+            echo "Using stored watermark: $STORED_SHA"
+            echo "sha=$STORED_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "No stored watermark; falling back to github.event.before: $FALLBACK_SHA"
+            echo "sha=$FALLBACK_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+  tag-issues-with-environment:
+    name: Tag deployed PRs and issues for test
+    needs: [deploy-apps, deploy-infrastructure, get-previous-deployed-sha]
+    if: ${{ always() && !failure() && !cancelled() && github.event_name == 'push' && needs.deploy-apps.outputs.deployment_executed == 'true' }}
+    uses: ./.github/workflows/workflow-tag-issues-with-environment.yml
+    with:
+      environment-label: at23
+      from-sha: ${{ needs.get-previous-deployed-sha.outputs.sha }}
+      to-sha: ${{ github.sha }}
+
+  store-latest-deployed-sha:
+    name: Store latest deployed SHA for test
+    needs: [tag-issues-with-environment]
+    if: ${{ always() && !failure() && !cancelled() && needs.tag-issues-with-environment.result == 'success' }}
+    uses: ./.github/workflows/workflow-store-github-env-variable.yml
+    with:
+      variable_name: LATEST_DEPLOYED_SHA
+      variable_value: ${{ github.sha }}
+      environment: test
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}

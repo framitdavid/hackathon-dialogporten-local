@@ -1,0 +1,730 @@
+using System.Runtime.CompilerServices;
+using AwesomeAssertions;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Content;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Localizations;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Queries.SearchLabelAssignmentLog;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.Actors;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Create;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.CreateActivity;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.CreateTransmission;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Delete;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Purge;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Restore;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Update;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.UpdateFormSavedActivityTime;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.UpdateTransmission;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.ServiceOwnerContext.Commands.Update;
+using Digdir.Domain.Dialogporten.Domain.Actors;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Activities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Transmissions;
+using Digdir.Library.Entity.Abstractions.Features.Identifiable;
+using Digdir.Tool.Dialogporten.GenerateFakeData;
+using Microsoft.Extensions.DependencyInjection;
+using OneOf;
+using DialogDtoSO = Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Get.DialogDto;
+using DialogDtoEU = Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Get.DialogDto;
+using GetDialogQueryEU = Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Get.GetDialogQuery;
+using GetDialogResultEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Get.GetDialogResult;
+using SearchDialogResultEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Search.SearchDialogResult;
+using SearchDialogQueryEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Search.SearchDialogQuery;
+using GetDialogQuerySO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Get.GetDialogQuery;
+using GetDialogResultSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Get.GetDialogResult;
+using SearchDialogResultSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Search.SearchDialogResult;
+using SearchDialogQuerySO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Search.SearchDialogQuery;
+using SearchDialogEndUserContextResult =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.SearchEndUserContext.SearchDialogEndUserContextResult;
+using SearchDialogEndUserContextQuery =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.SearchEndUserContext.SearchDialogEndUserContextQuery;
+using GetTransmissionQueryEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.GetTransmission.GetTransmissionQuery;
+using GetTransmissionQuerySO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.GetTransmission.GetTransmissionQuery;
+using GetTransmissionResultEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.GetTransmission.GetTransmissionResult;
+using GetTransmissionResultSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.GetTransmission.GetTransmissionResult;
+using BulkSetSystemLabelResultEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.BulkSetSystemLabels.BulkSetSystemLabelResult;
+using BulkSetSystemLabelCommandEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.BulkSetSystemLabels.BulkSetSystemLabelCommand;
+using BulkSetSystemLabelResultSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.EndUserContext.Commands.BulkSetSystemLabels.BulkSetSystemLabelResult;
+using BulkSetSystemLabelCommandSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.EndUserContext.Commands.BulkSetSystemLabels.BulkSetSystemLabelCommand;
+using GetActivityQuery =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.GetActivity.GetActivityQuery;
+using GetActivityResult =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.GetActivity.GetActivityResult;
+using SetSystemLabelResultEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.SetSystemLabel.SetSystemLabelResult;
+using SetSystemLabelCommandEU =
+    Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.SetSystemLabel.SetSystemLabelCommand;
+using SetSystemLabelResultSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.EndUserContext.Commands.SetSystemLabels.SetSystemLabelResult;
+using SetSystemLabelCommandSO =
+    Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.EndUserContext.Commands.SetSystemLabels.SetSystemLabelCommand;
+using TransmissionAttachmentDto = Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.UpdateTransmission.TransmissionAttachmentDto;
+using TransmissionAttachmentUrlDto = Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.UpdateTransmission.TransmissionAttachmentUrlDto;
+using TransmissionNavigationalActionDto = Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.UpdateTransmission.TransmissionNavigationalActionDto;
+using SearchSeenLogQueryEu = Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.SearchSeenLogs.SearchSeenLogQuery;
+using SearchSeenLogResultEu = Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.SearchSeenLogs.SearchSeenLogResult;
+using SearchSeenLogQuerySo = Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.SearchSeenLogs.SearchSeenLogQuery;
+using SearchSeenLogResultSo = Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.SearchSeenLogs.SearchSeenLogResult;
+
+namespace Digdir.Domain.Dialogporten.Application.Integration.Tests.Common.ApplicationFlow;
+
+public static class IFlowStepExtensions
+{
+    private const string DialogIdKey = "DialogId";
+    private const string TransmissionIdKey = "TransmissionId";
+    private const string PartyKey = "Party";
+    private const string ActivityIdKey = "ActivityId";
+    private const string ServiceResource = "ServiceResource";
+
+    public static IFlowExecutor<CreateDialogSuccess> CreateDialogs(this IFlowStep step,
+        params CreateDialogCommand[] commands)
+    {
+        foreach (var command in commands)
+        {
+            step = step
+                .SendCommand(_ => command)
+                .AssertResult<CreateDialogSuccess>();
+        }
+
+        return step as IFlowExecutor<CreateDialogSuccess>
+               ?? throw new ArgumentException("At least one command is required to create dialogs.", nameof(commands));
+    }
+
+    public static IFlowExecutor<CreateDialogResult> CreateDialog(this IFlowStep step,
+        Func<FlowContext, CreateDialogCommand> commandSelector) =>
+        step.SendCommand(ctx =>
+        {
+            var command = commandSelector(ctx);
+            command.Dto.Id ??= IdentifiableExtensions.CreateVersion7(DialogApplication.Clock.UtcNowOffset);
+            ctx.Bag[DialogIdKey] = command.Dto.Id;
+            ctx.Bag[ServiceResource] = command.Dto.ServiceResource;
+            ctx.Bag[PartyKey] = command.Dto.Party;
+            return command;
+        });
+
+    public static IFlowExecutor<CreateTransmissionResult> CreateTransmission(
+        this IFlowStep step,
+        Guid? ifMatchDialogRevision = null) =>
+        step.CreateTransmission((_, _) =>
+            { }, ifMatchDialogRevision);
+
+    public static IFlowExecutor<CreateTransmissionResult> CreateTransmission(
+        this IFlowStep step,
+        Action<CreateTransmissionDto, FlowContext>? modify,
+        Guid? ifMatchDialogRevision = null) =>
+        step.SendCommand(ctx =>
+        {
+            var transmission = new CreateTransmissionDto
+            {
+                Type = DialogTransmissionType.Values.Information,
+                Sender = new()
+                {
+                    ActorType = ActorType.Values.ServiceOwner
+                },
+                Content = new()
+                {
+                    Title = new ContentValueDto
+                    {
+                        Value =
+                        [
+                            new LocalizationDto
+                            {
+                                LanguageCode = "nb",
+                                Value = "Ny melding"
+                            }
+                        ]
+                    }
+                }
+            };
+
+            modify?.Invoke(transmission, ctx);
+
+            transmission.Id ??= IdentifiableExtensions.CreateVersion7(DialogApplication.Clock.UtcNowOffset);
+            ctx.Bag[TransmissionIdKey] = transmission.Id;
+
+            var command = new CreateTransmissionCommand
+            {
+                DialogId = ctx.GetDialogId(),
+                IfMatchDialogRevision = ifMatchDialogRevision,
+                Transmissions = [transmission]
+            };
+
+            return command;
+        });
+
+    public static IFlowExecutor<CreateDialogResult> CreateComplexDialog(this IFlowStep step,
+        Action<CreateDialogCommand, FlowContext>? initialState = null, int seed = DialogGenerator.DefaultSeed) =>
+        step.CreateDialog(_ =>
+        {
+            var command = new CreateDialogCommand
+            {
+                Dto = DialogGenerator.CreateDialogFaker
+                    .Clone()
+                    .UseSeed(seed)
+                    .Generate()
+            };
+
+            initialState?.Invoke(command, step.Context);
+            return command;
+        });
+
+    public static IFlowExecutor<CreateDialogResult> CreateSimpleDialog(this IFlowStep step,
+        Action<CreateDialogCommand, FlowContext>? initialState = null, int seed = DialogGenerator.DefaultSeed) =>
+        step.CreateDialog(_ =>
+        {
+            var command = new CreateDialogCommand
+            {
+                Dto = DialogGenerator.CreateSimpleDialogFaker
+                    .Clone()
+                    .UseSeed(seed)
+                    .Generate()
+            };
+
+            initialState?.Invoke(command, step.Context);
+            return command;
+        });
+
+    public static IFlowExecutor<SearchLabelAssignmentLogResult> GetLabelAssignmentLogs(this IFlowStep step) =>
+        step.SendCommand(x =>
+        {
+            var command = new SearchLabelAssignmentLogQuery
+            {
+                DialogId = x.GetDialogId(),
+            };
+            return command;
+        });
+
+    public static IFlowExecutor<SetSystemLabelResultEU> SetSystemLabelsEndUser(this IFlowStep step,
+        Action<SetSystemLabelCommandEU>? modify = null) =>
+        step.SendCommand(x =>
+        {
+            var command = new SetSystemLabelCommandEU
+            {
+                DialogId = x.GetDialogId(),
+            };
+            modify?.Invoke(command);
+            return command;
+        });
+
+    public static IFlowExecutor<SetSystemLabelResultSO> SetSystemLabelsServiceOwner(
+        this IFlowStep<CreateDialogResult> step,
+        Action<SetSystemLabelCommandSO>? modify = null) =>
+        step.AssertResult<CreateDialogSuccess>()
+            .SendCommand(x =>
+            {
+                var command = new SetSystemLabelCommandSO
+                {
+                    DialogId = x.GetDialogId(),
+                    EndUserId = x.GetParty()
+                };
+                modify?.Invoke(command);
+                return command;
+            });
+
+
+    public static IFlowExecutor<PurgeDialogResult> PurgeDialog(this IFlowStep<CreateDialogResult> step,
+        Action<PurgeDialogCommand>? modify = null) =>
+        step.AssertResult<CreateDialogSuccess>()
+            .SendCommand(x =>
+            {
+                var command = new PurgeDialogCommand
+                {
+                    DialogId = x.DialogId,
+                    IfMatchDialogRevision = x.Revision
+                };
+                modify?.Invoke(command);
+                return command;
+            });
+
+    [Obsolete(
+        "We should not need to override services for any tests. If we do, we should consider using the same pattern as for TestUser and TestClock.")]
+    public static IFlowStep ConfigureServices(this IFlowStep step, Action<IServiceCollection> configure) =>
+        step.Do(x => { x.Application.ConfigureServices(configure); });
+
+    [Obsolete(
+        "We should not need to override services for any tests. If we do, we should consider using the same pattern as for TestUser and TestClock.")]
+    public static IFlowStep<T> ConfigureServices<T>(this IFlowStep<T> step, Action<IServiceCollection> configure) =>
+        step.Select(x =>
+        {
+            step.Context.Application.ConfigureServices(configure);
+            return x;
+        });
+
+    public static IFlowExecutor<DeleteDialogResult> DeleteDialog(this IFlowStep<CreateDialogResult> step,
+        Action<DeleteDialogCommand>? modify = null) =>
+        step.AssertResult<CreateDialogSuccess>()
+            .SendCommand(x =>
+            {
+                var command = new DeleteDialogCommand { Id = x.DialogId };
+                modify?.Invoke(command);
+                return command;
+            });
+
+    public static IFlowExecutor<RestoreDialogResult> RestoreDialog(this IFlowStep<DeleteDialogResult> step,
+        Action<RestoreDialogCommand>? modify = null) =>
+        step.AssertResult<DeleteDialogSuccess>()
+            .SendCommand((_, ctx) =>
+            {
+                var command = new RestoreDialogCommand { DialogId = ctx.GetDialogId() };
+                modify?.Invoke(command);
+                return command;
+            });
+
+    public static IFlowExecutor<UpdateDialogResult> AssertSuccessAndUpdateDialog(this IFlowStep<IOneOf> step,
+        Action<UpdateDialogCommand> modify) => step.AssertSuccess().UpdateDialog(modify);
+
+    public static IFlowExecutor<UpdateDialogResult> UpdateDialog(this IFlowStep step,
+        Action<UpdateDialogCommand> modify) =>
+        step.SendCommand(x => CreateGetServiceOwnerDialogQuery(x.GetDialogId()))
+            .AssertResult<DialogDtoSO>()
+            .SendCommand((x, ctx) =>
+            {
+                var command = CreateUpdateDialogCommand(x, ctx);
+                modify(command);
+                return command;
+            });
+
+    public static IFlowExecutor<UpdateDialogResult> UpdateDialog(this IFlowStep<DialogDtoSO> step,
+        Action<UpdateDialogCommand> modify) => step
+        .SendCommand((x, ctx) =>
+        {
+            var command = CreateUpdateDialogCommand(x, ctx);
+            modify(command);
+            return command;
+        });
+
+    public static IFlowExecutor<UpdateDialogResult> UpdateDialog(this IFlowStep<DialogDtoEU> step,
+        Action<UpdateDialogCommand> modify) => step
+        .SendCommand((_, ctx) => CreateGetServiceOwnerDialogQuery(ctx.GetDialogId()))
+        .AssertResult<DialogDtoSO>()
+        .SendCommand((x, ctx) =>
+        {
+            var command = CreateUpdateDialogCommand(x, ctx);
+            modify(command);
+            return command;
+        });
+
+    public static IFlowExecutor<UpdateTransmissionResult> UpdateTransmission(this IFlowStep step,
+        Action<UpdateTransmissionCommand, FlowContext> modify) =>
+        step.SendCommand(ctx => CreateGetServiceOwnerDialogQuery(ctx.GetDialogId()))
+            .AssertResult<DialogDtoSO>()
+            .SendCommand((dialog, ctx) =>
+            {
+                var transmissionId = ctx.GetTransmissionId();
+                var transmission = dialog.Transmissions.Single(x => x.Id == transmissionId);
+                var updateTransmissionDto = new UpdateTransmissionDto
+                {
+                    IdempotentKey = transmission.IdempotentKey,
+                    CreatedAt = transmission.CreatedAt,
+                    AuthorizationAttribute = transmission.AuthorizationAttribute,
+                    AuthorizationContext = transmission.AuthorizationContext is null
+                        ? null
+                        : new()
+                        {
+                            ServiceResource = transmission.AuthorizationContext.ServiceResource,
+                            AdditionalResourceAttribute = transmission.AuthorizationContext.AdditionalResourceAttribute,
+                            Parties = [.. transmission.AuthorizationContext.Parties],
+                            IncludeDialogParty = transmission.AuthorizationContext.IncludeDialogParty,
+                            Action = transmission.AuthorizationContext.Action,
+                            TokenRef = transmission.AuthorizationContext.TokenRef,
+                            UnauthorizedPresentation = transmission.AuthorizationContext.UnauthorizedPresentation
+                        },
+                    ExtendedType = transmission.ExtendedType,
+                    ExternalReference = transmission.ExternalReference,
+                    RelatedTransmissionId = transmission.RelatedTransmissionId,
+                    Type = transmission.Type,
+                    Sender = transmission.Sender,
+                    Content = new()
+                    {
+                        Title = transmission.Content.Title,
+                        Summary = transmission.Content.Summary,
+                        ContentReference = transmission.Content.ContentReference
+                    },
+                    Attachments = transmission.Attachments.Select(x => new TransmissionAttachmentDto
+                    {
+                        Id = x.Id,
+                        DisplayName = x.DisplayName,
+                        Urls = x.Urls.Select(x => new TransmissionAttachmentUrlDto
+                        {
+                            Url = x.Url,
+                            MediaType = x.MediaType,
+                            ConsumerType = x.ConsumerType
+                        }).ToList(),
+                        ExpiresAt = x.ExpiresAt,
+                        AuthorizationContext = x.AuthorizationContext.ToUpdateTransmissionChildContext()
+                    }).ToList(),
+                    NavigationalActions = transmission.NavigationalActions.Select(x => new TransmissionNavigationalActionDto
+                    {
+                        Id = x.Id,
+                        Title = x.Title,
+                        Url = x.Url,
+                        ExpiresAt = x.ExpiresAt,
+                        AuthorizationContext = x.AuthorizationContext.ToUpdateTransmissionChildContext()
+                    }).ToList(),
+                };
+
+                var updateTransmissionCommand = new UpdateTransmissionCommand
+                {
+                    Dto = updateTransmissionDto,
+                    DialogId = ctx.GetDialogId(),
+                    IsSilentUpdate = true,
+                    TransmissionId = ctx.GetTransmissionId()
+                };
+                modify(updateTransmissionCommand, ctx);
+                return updateTransmissionCommand;
+            });
+
+    public static IFlowExecutor<UpdateDialogServiceOwnerContextResult> UpdateServiceOwnerContext(
+        this IFlowStep<CreateDialogResult> step,
+        Action<UpdateDialogServiceOwnerContextCommand> modify) =>
+        step.AssertResult<CreateDialogSuccess>()
+            .SendCommand((_, ctx) =>
+            {
+                var command = new UpdateDialogServiceOwnerContextCommand
+                {
+                    Dto = new(),
+                    DialogId = ctx.GetDialogId()
+                };
+                modify(command);
+                return command;
+            });
+
+    public static IFlowExecutor<GetDialogResultSO> GetServiceOwnerDialog(this IFlowStep step) =>
+        step.SendCommand(ctx => CreateGetServiceOwnerDialogQuery(ctx.GetDialogId()));
+
+    public static IFlowExecutor<GetDialogResultSO> GetServiceOwnerDialogAsEndUser(this IFlowStep step) =>
+        step.SendCommand(ctx => new GetDialogQuerySO
+        {
+            DialogId = ctx.GetDialogId(),
+            EndUserId = ctx.GetParty()
+        });
+
+    public static IFlowExecutor<GetDialogResultEU> GetEndUserDialog(this IFlowStep step, Guid? dialogId = null) =>
+        step.SendCommand(ctx => new GetDialogQueryEU { DialogId = dialogId ?? ctx.GetDialogId() });
+
+    public static IFlowExecutor<SearchSeenLogResultEu> GetEndUserSeenLogs(this IFlowStep step) =>
+        step.SendCommand(ctx => new SearchSeenLogQueryEu { DialogId = ctx.GetDialogId() });
+
+    public static IFlowExecutor<SearchSeenLogResultSo> GetServiceOwnerSeenLogs(this IFlowStep step) =>
+        step.SendCommand(ctx => new SearchSeenLogQuerySo { DialogId = ctx.GetDialogId() });
+
+    public static IFlowExecutor<GetTransmissionResultSO> GetServiceOwnerTransmission(this IFlowStep step,
+        Guid transmissionId) =>
+        step.SendCommand(ctx => new GetTransmissionQuerySO
+        {
+            DialogId = ctx.GetDialogId(),
+            TransmissionId = transmissionId
+        });
+
+    public static IFlowExecutor<GetTransmissionResultEU> GetEndUserTransmission(this IFlowStep step,
+        Guid transmissionId) =>
+        step.SendCommand(ctx => new GetTransmissionQueryEU
+        {
+            DialogId = ctx.GetDialogId(),
+            TransmissionId = transmissionId
+        });
+
+    public static IFlowExecutor<SearchDialogResultSO> SearchServiceOwnerDialogs(this IFlowStep step,
+        Action<SearchDialogQuerySO> modify) => step.SearchServiceOwnerDialogs((query, _) => modify(query));
+
+    public static IFlowExecutor<SearchDialogResultSO> SearchServiceOwnerDialogs(this IFlowStep step,
+        Action<SearchDialogQuerySO, FlowContext> modify)
+    {
+        return step.SendCommand(_ =>
+        {
+            var query = new SearchDialogQuerySO();
+            modify(query, step.Context);
+            return query;
+        });
+    }
+
+    public static IFlowExecutor<SearchDialogEndUserContextResult> SearchServiceOwnerDialogEndUserContexts(
+        this IFlowStep step,
+        Action<SearchDialogEndUserContextQuery> modify) =>
+        step.SearchServiceOwnerDialogEndUserContexts((query, _) => modify(query));
+
+    public static IFlowExecutor<SearchDialogEndUserContextResult> SearchServiceOwnerDialogEndUserContexts(
+        this IFlowStep step,
+        Action<SearchDialogEndUserContextQuery, FlowContext> modify) =>
+        step.SendCommand(_ =>
+        {
+            var query = new SearchDialogEndUserContextQuery();
+            modify(query, step.Context);
+            return query;
+        });
+
+    public static IFlowExecutor<SearchDialogResultEU> SearchEndUserDialogs(this IFlowStep step,
+        Action<SearchDialogQueryEU> modify) => step.SearchEndUserDialogs((query, _) => modify(query));
+
+    public static IFlowExecutor<SearchDialogResultEU> SearchEndUserDialogs(this IFlowStep step,
+        Action<SearchDialogQueryEU, FlowContext> modify)
+    {
+        return step.SendCommand(_ =>
+        {
+            var query = new SearchDialogQueryEU();
+            modify(query, step.Context);
+            return query;
+        });
+    }
+
+    public static IFlowExecutor<BulkSetSystemLabelResultEU> BulkSetSystemLabelEndUser(
+        this IFlowStep<CreateDialogResult> step, Action<BulkSetSystemLabelCommandEU, FlowContext> modify) =>
+        step.SendCommand((_, ctx) =>
+        {
+            var command = new BulkSetSystemLabelCommandEU { Dto = new() };
+            modify(command, ctx);
+            return command;
+        });
+
+    public static IFlowExecutor<BulkSetSystemLabelResultSO> BulkSetSystemLabelServiceOwner(
+        this IFlowStep<CreateDialogResult> step, Action<BulkSetSystemLabelCommandSO, FlowContext> modify) =>
+        step.SendCommand((_, ctx) =>
+        {
+            var command = new BulkSetSystemLabelCommandSO { Dto = new() };
+            modify(command, ctx);
+            return command;
+        });
+
+    public static IFlowExecutor<UpdateFormSavedActivityTimeResult> UpdateFormSavedActivityTime(
+        this IFlowStep<CreateDialogResult> step,
+        Guid activityId,
+        DateTimeOffset? newCreatedAt = null) =>
+        step.AssertResult<CreateDialogSuccess>()
+            .SendCommand(ctx => new UpdateFormSavedActivityTimeCommand
+            {
+                DialogId = ctx.GetDialogId(),
+                ActivityId = activityId,
+                NewCreatedAt = newCreatedAt ?? DateTimeOffset.UtcNow
+            });
+
+    public static IFlowExecutor<CreateActivityResult> CreateSimpleActivity<TIn>(this IFlowExecutor<TIn> step) =>
+        CreateActivity(step, (x, _) =>
+        {
+            x.Activity = new CreateActivityDto
+            {
+                Id = Guid.CreateVersion7(),
+                CreatedAt = new DateTimeOffset(2001, 1, 1, 1, 1, 1, TimeSpan.Zero),
+                ExtendedType = new Uri("https://altinn.no"),
+                Type = DialogActivityType.Values.DialogCreated,
+                TransmissionId = null,
+                PerformedBy = new ActorDto
+                {
+                    ActorType = ActorType.Values.PartyRepresentative,
+                    ActorName = null,
+                    ActorId = "urn:altinn:person:legacy-selfidentified:Leif"
+                },
+                Description = []
+            };
+        });
+
+    public static IFlowExecutor<CreateActivityResult> CreateActivity<TIn>(
+        this IFlowExecutor<TIn> step,
+        Action<CreateActivityCommand, FlowContext> modify) =>
+        step
+            .SendCommand(ctx =>
+            {
+                var createActivityCommand = new CreateActivityCommand
+                {
+                    DialogId = ctx.GetDialogId(),
+                    IfMatchDialogRevision = null,
+                    Activity = new(),
+                    IsSilentUpdate = false
+                };
+                modify(createActivityCommand, ctx);
+                return createActivityCommand;
+            });
+
+    public static IFlowExecutor<GetActivityResult> GetActivity(
+        this IFlowStep<CreateActivityResult> step) =>
+        step.AssertResult<CreateActivitySuccess>((x, a) => a.Bag[ActivityIdKey] = x.ActivityId)
+            .SendCommand(ctx => new GetActivityQuery
+            {
+                DialogId = ctx.GetDialogId(),
+                ActivityId = ctx.GetActivityId()
+            });
+
+    public static IFlowExecutor<TIn> Modify<TIn>(
+        this IFlowStep<TIn> step,
+        Action<TIn> selector) => step.Modify((x, _)
+        => selector(x));
+
+    public static IFlowExecutor<TIn> Modify<TIn>(
+        this IFlowStep<TIn> step,
+        Action<TIn, FlowContext> selector) =>
+        step.Select((@in, context) =>
+        {
+            selector(@in, context);
+            return @in;
+        });
+
+    public static IFlowExecutor<TOut> SelectAsync<TIn, TOut>(
+        this IFlowStep<TIn> step,
+        Func<TIn, FlowContext, CancellationToken, Task<TOut>> selector)
+    {
+        var context = step.Context;
+        context.Commands.Add(async (input, cancellationToken) =>
+            await selector((TIn)input!, context, cancellationToken));
+
+        return new FlowStep<TOut>(context);
+    }
+
+    public static Task<object> ExecuteAndAssert(
+        this IFlowStep<IOneOf> step,
+        Action<object>? assert) =>
+        step.Select(result =>
+        {
+            result.Value.Should().NotBeNull();
+            assert?.Invoke(result.Value);
+            return result.Value;
+        }).ExecuteAsync();
+
+    public static Task<object> ExecuteAndAssert(this IFlowStep<IOneOf> step, Type type)
+        => step.Select(result =>
+            {
+                result.Value.Should().BeOfType(type).And.NotBeNull();
+                return result.Value;
+            })
+            .ExecuteAsync();
+
+    public static Task<T> ExecuteAndAssert<T>(this IFlowStep<IOneOf> step, Action<T>? assert = null)
+        => step.AssertResult(assert).ExecuteAsync();
+
+    public static Task<T> ExecuteAndAssert<T>(this IFlowStep<IOneOf> step, Action<T, FlowContext> assert)
+        => step.AssertResult(assert).ExecuteAsync();
+
+    public static TFlowStep ConsumeEvents<TFlowStep>(this TFlowStep flowStep, Action<List<object>, FlowContext>? assert = null) where TFlowStep : IFlowStep =>
+        flowStep.Do(async ctx =>
+        {
+            var events = await ctx.Application.PublishEvents();
+            assert?.Invoke(events, ctx);
+        });
+
+    public static TFlowStep VerifySnapshot<TFlowStep>(
+        this TFlowStep flowStep,
+        Action<VerifySettings>? configureSettings = null,
+        [CallerFilePath] string sourceFile = "") where TFlowStep : IFlowStep =>
+        flowStep.Do((x, _) =>
+        {
+            var settings = new VerifySettings();
+            settings.IncludeObsoletes();
+            configureSettings?.Invoke(settings);
+
+            return x is IOneOf oneOf
+                ? Verify(oneOf.Value, settings, sourceFile)
+                    .UseDirectory("Snapshots")
+                : Verify(x, settings, sourceFile)
+                    .UseDirectory("Snapshots");
+        });
+
+    public static IFlowExecutor<T> AssertResult<T>(this IFlowStep<IOneOf> step, Action<T>? assert = null) =>
+        step.Select(result =>
+        {
+            var typedResult = result.Value.Should().BeOfType<T>().Subject;
+            typedResult.Should().NotBeNull();
+            assert?.Invoke(typedResult);
+            return typedResult;
+        });
+
+    public static IFlowExecutor<T> AssertResult<T>(this IFlowStep<IOneOf> step, Action<T, FlowContext> assert) =>
+        step.Select((result, context) =>
+        {
+            var typedResult = result.Value.Should().BeOfType<T>().Subject;
+            typedResult.Should().NotBeNull();
+            assert(typedResult, context);
+            return typedResult;
+        });
+
+    public static IFlowStep AssertSuccess(this IFlowStep<IOneOf> step) =>
+        step.Select(result =>
+        {
+            result.Index.Should().Be(0);
+            var typedResult = result.Value;
+            typedResult.Should().NotBeNull();
+            return typedResult;
+        });
+
+    public static Guid GetDialogId(this FlowContext ctx)
+    {
+        ctx.Bag.TryGetValue(DialogIdKey, out var value).Should().BeTrue();
+        return value.Should().BeOfType<Guid>().Subject;
+    }
+
+    public static Guid GetGuidByKey(this FlowContext ctx, string key)
+    {
+        ctx.Bag.TryGetValue(key, out var value).Should().BeTrue();
+        return value.Should().BeOfType<Guid>().Subject;
+    }
+
+    public static Guid GetTransmissionId(this FlowContext ctx)
+        => ctx.GetGuidByKey(TransmissionIdKey);
+
+    public static Guid GetActivityId(this FlowContext ctx)
+    {
+        ctx.Bag.TryGetValue(ActivityIdKey, out var value).Should().BeTrue();
+        return value.Should().BeOfType<Guid>().Subject;
+    }
+
+    public static string GetParty(this FlowContext ctx)
+    {
+        ctx.Bag.TryGetValue(PartyKey, out var value).Should().BeTrue();
+        return value.Should().BeOfType<string>().Subject;
+    }
+
+    public static string GetServiceResource(this FlowContext ctx)
+    {
+        ctx.Bag.TryGetValue(ServiceResource, out var value).Should().BeTrue();
+        return value.Should().BeOfType<string>().Subject;
+    }
+
+    public static UpdateDialogCommand CreateUpdateDialogCommand(DialogDtoSO dto, FlowContext ctx)
+    {
+        var updateDto = dto.ToUpdateDialogDto();
+        return new UpdateDialogCommand
+        {
+            IfMatchDialogRevision = dto.Revision,
+            Id = ctx.GetDialogId(),
+            Dto = updateDto
+        };
+    }
+
+    public static UpdateDialogCommand CreateUpdateDialogCommand(DialogDtoEU dto, FlowContext ctx)
+    {
+        var updateDto = ctx.Application.GetMapper().Map<UpdateDialogDto>(dto);
+        return new UpdateDialogCommand
+        {
+            IfMatchDialogRevision = dto.Revision,
+            Id = ctx.GetDialogId(),
+            Dto = updateDto
+        };
+    }
+
+    private static GetDialogQuerySO CreateGetServiceOwnerDialogQuery(Guid id) => new() { DialogId = id };
+
+    private static Digdir.Domain.Dialogporten.Application.Features.V1.Common.AuthorizationContexts.AuthorizationContextDto? ToUpdateTransmissionChildContext(
+        this Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Get.AuthorizationContextDto? source) =>
+        source is null
+            ? null
+            : new()
+            {
+                ServiceResource = source.ServiceResource,
+                AdditionalResourceAttribute = source.AdditionalResourceAttribute,
+                Parties = [.. source.Parties],
+                IncludeDialogParty = source.IncludeDialogParty,
+                Action = source.Action,
+                TokenRef = source.TokenRef,
+                UnauthorizedPresentation = source.UnauthorizedPresentation
+            };
+
+}

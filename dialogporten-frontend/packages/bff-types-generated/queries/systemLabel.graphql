@@ -1,0 +1,15 @@
+mutation updateSystemLabel($dialogId: UUID!, $addLabels: [SystemLabel!]!, $removeLabels: [SystemLabel!]!) {
+  setSystemLabel(input: { dialogId: $dialogId, addLabels: $addLabels, removeLabels: $removeLabels }) {
+    success
+  }
+}
+
+mutation bulkUpdateSystemLabels(
+  $dialogs: [DialogRevisionInput!]!
+  $addLabels: [SystemLabel!]!
+  $removeLabels: [SystemLabel!]!
+) {
+  bulkSetSystemLabels(input: { dialogs: $dialogs, addLabels: $addLabels, removeLabels: $removeLabels }) {
+    success
+  }
+}

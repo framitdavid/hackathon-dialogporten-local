@@ -1,0 +1,6 @@
+mutation DeleteFavoriteParty($partyId: String!) {
+  deleteFavoriteParty(partyId: $partyId) {
+    success
+    message
+  }
+}

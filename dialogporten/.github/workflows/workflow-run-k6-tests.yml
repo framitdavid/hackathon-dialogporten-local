@@ -1,0 +1,68 @@
+name: Run K6 tests
+
+on:
+  workflow_call:
+    inputs:
+      apiVersion:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      testSuitePath:
+        required: true
+        type: string
+      ref:
+        description: "The branch or tag ref to run the tests on. Using default checkout ref if not provided."
+        required: false
+        default: ${{ github.ref }}
+        type: string
+    secrets:
+      TOKEN_GENERATOR_USERNAME:
+        required: true
+      TOKEN_GENERATOR_PASSWORD:
+        required: true
+
+jobs:
+  k6-test:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+
+    steps:
+    - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+      with:
+        egress-policy: audit
+
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.ref }}
+
+    # todo: change to use the new https://github.com/grafana/setup-k6-action and https://github.com/grafana/run-k6-action
+    # grafana/k6-action is deprecated
+    - name: Run K6 tests (${{ inputs.testSuitePath }})
+      uses: grafana/k6-action@e4714b734f2b0afaabeb7b4a69142745548ab9ec # v0.3.1
+      with:
+        filename: ${{ inputs.testSuitePath }}
+        flags: --quiet --log-output=stdout --include-system-env-vars
+      env:
+        API_ENVIRONMENT: ${{ inputs.environment }}
+        API_VERSION: ${{ inputs.apiVersion }}
+        TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+        TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+
+    - name: Store test summary
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: k6-summary-report
+        path: junit.xml
+
+    - name: 'Publish test results'
+      uses: EnricoMi/publish-unit-test-result-action@d0a4676d0e0b938bc201470d88276b7c74c712b3 # v2.24.0
+      if: always()
+      with:
+        action_fail: true
+        files: |
+          junit.xml

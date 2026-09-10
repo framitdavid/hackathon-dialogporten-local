@@ -1,0 +1,14 @@
+services:
+  dialogporten-service:
+    build:
+      context: .
+      dockerfile: src/Digdir.Domain.Dialogporten.Service/Dockerfile
+    restart: always
+    depends_on:
+      dialogporten-postgres:
+        condition: service_healthy
+      dialogporten-migrations:
+        condition: service_completed_successfully
+    environment:
+      - Infrastructure:DialogDbConnectionString=${DB_CONNECTION_STRING}
+      - ASPNETCORE_ENVIRONMENT=Development

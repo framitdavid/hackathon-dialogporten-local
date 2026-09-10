@@ -1,0 +1,46 @@
+using System.ComponentModel;
+using Digdir.Library.Entity.Abstractions.Features.Lookup;
+
+namespace Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+
+public sealed class SystemLabel(SystemLabel.Values id) :
+    AbstractLookupEntity<SystemLabel, SystemLabel.Values>(id)
+{
+    public const string Prefix = "systemlabel";
+    public const string PrefixWithSeparator = Prefix + ":";
+
+    public enum Values
+    {
+        // Keep PostgresFormattableStringBuilderExtensions.SupportedSystemLabelsMaskBitCount in sync when adding labels used by end-user search filters.
+        Default = 1,
+        Bin = 2,
+        Archive = 3,
+        MarkedAsUnopened = 4,
+        Sent = 5
+    }
+
+    public override SystemLabel MapValue(Values id) => new(id);
+
+    public static HashSet<Values> DefaultArchiveBinGroup { get; } =
+    [
+        Values.Default,
+        Values.Bin,
+        Values.Archive
+    ];
+
+    public static bool IsDefaultArchiveBinGroup(Values label) =>
+        label is Values.Bin or Values.Archive or Values.Default;
+}
+
+public static class SystemLabelExtensions
+{
+    public static string ToNamespacedName(this SystemLabel.Values label) => label switch
+    {
+        SystemLabel.Values.Default => SystemLabel.PrefixWithSeparator + label,
+        SystemLabel.Values.Bin => SystemLabel.PrefixWithSeparator + label,
+        SystemLabel.Values.Archive => SystemLabel.PrefixWithSeparator + label,
+        SystemLabel.Values.Sent => SystemLabel.PrefixWithSeparator + label,
+        SystemLabel.Values.MarkedAsUnopened => SystemLabel.PrefixWithSeparator + label,
+        _ => throw new InvalidEnumArgumentException(nameof(label), (int)label, typeof(SystemLabel.Values))
+    };
+}

@@ -1,0 +1,47 @@
+import { default as createDialogPayload } from "../serviceowner/testdata/01-create-dialog.js"
+import { sentinelPerformanceValue } from "../../common/config.js";
+
+function cleanUp(originalPayload) {
+    if (!originalPayload || typeof originalPayload !== 'object') {
+        throw new Error('Invalid payload');
+    }
+
+    const payload = {
+        ...originalPayload,
+        searchTags: [...(originalPayload.searchTags || []), { "value": sentinelPerformanceValue }]
+    };
+    return payload
+}
+
+/**
+ * Creates a dialog payload for performance testing
+ * @param {string} endUser - Norwegian national ID number (11 digits)
+ * @param {string} resource - Resource identifier
+ * @param {boolean} [stripDialog=false] - If true, removes transmissions, activities, and attachments from the dialog
+ * @returns {Object} Dialog payload
+ * @throws {Error} If inputs are invalid
+ */
+export default function (endUser, resource, stripDialog = false, label = null) {
+    if (!endUser?.match(/^\d{11}$/)) {
+        throw new Error('endUser must be a 11-digit number');
+    }
+    if (!resource?.trim()) {
+        throw new Error('resource is required');
+    }
+    let payload = createDialogPayload();
+    if (stripDialog) {
+        payload.transmissions = [];
+        payload.activities = [];
+        payload.attachments = []
+    }
+    payload.serviceResource = "urn:altinn:resource:" + resource;
+    payload.party = "urn:altinn:person:identifier-no:" + endUser;
+    if (label) {
+        payload.systemLabel = label;
+    }
+    delete payload.visibleFrom;
+
+    return cleanUp(payload);
+}
+
+

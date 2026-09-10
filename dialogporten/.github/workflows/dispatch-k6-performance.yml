@@ -1,0 +1,97 @@
+name: Run K6 performance test
+
+on:
+  workflow_dispatch:
+    inputs:
+      apiVersion:
+        description: 'API Version'
+        required: true
+        default: 'v1'
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'yt01'
+        type: choice
+        options:
+          - test
+          - staging
+          - yt01
+      tag:
+        description: 'tag the performance test'
+        required: true
+        default: 'Performance test'
+        type: string
+      vus:
+        description: 'Number of VUS'
+        required: true
+        default: 1
+        type: number
+      duration:
+        description: 'Duration of test, ie 30s, 1m, 10m'
+        required: true
+        default: 1m
+        type: string
+      parallelism:
+        description: 'Number of parallel test runs'
+        required: true
+        default: 1
+        type: number 
+      numberOfEndUsers:
+        description: 'Number of end users'
+        required: true
+        default: 2799
+        type: number 
+      testSuitePath:
+        description: 'Path to test suite to run'
+        required: true
+        default: 'tests/k6/tests/serviceowner/performance/create-dialog.js'
+        type: choice
+        options:
+          - 'tests/k6/tests/serviceowner/performance/create-dialog.js'
+          - 'tests/k6/tests/serviceowner/performance/create-remove-dialog.js'
+          - 'tests/k6/tests/serviceowner/performance/serviceowner-search.js'
+          - 'tests/k6/tests/serviceowner/performance/serviceOwnerShouldSendNotification.js'
+          - 'tests/k6/tests/serviceowner/performance/serviceOwnerEnduserContextWorstcase.js'
+          - 'tests/k6/tests/serviceowner/performance/createDialogTransmissionActivity.js'
+          - 'tests/k6/tests/enduser/performance/enduser-search.js'
+          - 'tests/k6/tests/graphql/performance/graphql-search.js'
+          - 'tests/k6/tests/serviceowner/performance/create-transmissions.js'
+          - 'tests/k6/tests/serviceowner/performance/serviceOwnerRandomSearch.js'
+          - 'tests/k6/tests/enduser/performance/enduserRandomSearch.js'
+          - 'tests/k6/tests/graphql/performance/graphqlRandomSearch.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForEnduser.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForParties.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForEnduserFTS.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForPartiesFTS.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForParties.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForEnduserAutoCompleteFTS.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForPartiesAutoCompleteFTS.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForUserWorstCase.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetAllDialogsForOrgWorstCase.js'
+          - 'tests/k6/tests/graphql/performance/graphqlGetPartiesWorstCase.js'
+
+run-name: ${{ inputs.tag }} ${{ inputs.vus }}/${{ inputs.duration }}/${{ inputs.parallelism }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  k6-performance:
+    name: "Run K6 performance test"
+    uses: ./.github/workflows/workflow-run-k6-performance.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+    with:
+      environment: ${{ inputs.environment }}
+      apiVersion: ${{ inputs.apiVersion }}
+      testSuitePath: ${{ inputs.testSuitePath }}
+      vus: ${{ fromJson(inputs.vus) }}
+      duration: ${{ inputs.duration }}
+      parallelism: ${{ fromJson(inputs.parallelism) }}
+      numberOfEndUsers: ${{ fromJson(inputs.numberOfEndUsers) }}
+      breakpoint: false
+      abortOnFail: false
+
+

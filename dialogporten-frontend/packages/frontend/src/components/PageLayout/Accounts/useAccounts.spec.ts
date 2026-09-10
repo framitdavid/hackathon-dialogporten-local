@@ -1,0 +1,304 @@
+import { renderHook } from '@testing-library/react';
+import type { PartyFieldsFragment } from 'bff-types-generated';
+import { useTranslation } from 'react-i18next';
+import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { createCustomWrapper } from '../../../../tests/test-utils.tsx';
+import { useProfile } from '../../../pages/Profile/useProfile.tsx';
+import { buildPartyGraph } from '../../../utils/partyGraph.ts';
+import { formatNorwegianId, useAccounts } from './useAccounts.tsx';
+
+// Mock dependencies
+vi.mock('react-i18next', () => ({
+  useTranslation: vi.fn(),
+}));
+
+vi.mock('../../../pages/Profile/useProfile.tsx', () => ({
+  useProfile: vi.fn(),
+}));
+
+// Test data from the issue description
+const parties: PartyFieldsFragment[] = [
+  {
+    party: 'urn:altinn:person:identifier-no:1',
+    partyType: 'Person',
+    subParties: [],
+    name: 'TEST TESTESEN',
+    isCurrentEndUser: true,
+    isDeleted: false,
+    partyUuid: 'urn:altinn:person:uuid:test-testesen',
+    partyId: 1,
+    dateOfBirth: null,
+    hasOnlyAccessToSubParties: false,
+  },
+  {
+    party: 'urn:altinn:person:identifier-no:fff',
+    partyType: 'Person',
+    subParties: [],
+    name: 'Banksi',
+    isCurrentEndUser: false,
+    isDeleted: false,
+    partyUuid: 'urn:altinn:person:uuid:test-testesen',
+    partyId: 1,
+    dateOfBirth: null,
+    hasOnlyAccessToSubParties: false,
+  },
+  {
+    party: 'urn:altinn:person:identifier-no:eeee',
+    partyType: 'Person',
+    subParties: [],
+    name: 'ANKI A',
+    isCurrentEndUser: false,
+    isDeleted: false,
+    partyUuid: 'urn:altinn:person:uuid:test-testesen',
+    partyId: 1,
+    dateOfBirth: null,
+    hasOnlyAccessToSubParties: false,
+  },
+  {
+    party: 'urn:altinn:organization:identifier-no:2',
+    partyType: 'Organization',
+    subParties: [
+      {
+        party: 'urn:altinn:organization:identifier-sub:1',
+        partyType: 'Organization',
+        name: 'TESTBEDRIFT AS AVD SUB',
+        isCurrentEndUser: false,
+        partyUuid: 'urn:altinn:organization:uuid:testbedrift-avd-sub',
+        isDeleted: true,
+        partyId: 3,
+        dateOfBirth: null,
+      },
+      {
+        party: 'urn:altinn:organization:identifier-sub:3',
+        partyType: 'Organization',
+        name: 'TESTBEDRIFT AS',
+        isCurrentEndUser: false,
+        partyUuid: 'urn:altinn:organization:uuid:testbedrift-sub',
+        isDeleted: false,
+        partyId: 5,
+        dateOfBirth: null,
+      },
+      {
+        party: 'urn:altinn:organization:identifier-sub:100',
+        partyType: 'Organization',
+        name: 'Bavdeling A SUB',
+        isCurrentEndUser: false,
+        partyUuid: 'urn:altinn:organization:uuid:testbedrift-avd-oslo',
+        isDeleted: false,
+        partyId: 4,
+        dateOfBirth: null,
+      },
+      {
+        party: 'urn:altinn:organization:identifier-sub:2',
+        partyType: 'Organization',
+        name: 'Avdeling A SUB',
+        isCurrentEndUser: false,
+        partyUuid: 'urn:altinn:organization:uuid:testbedrift-avd-oslo',
+        isDeleted: false,
+        partyId: 4,
+        dateOfBirth: null,
+      },
+    ],
+    name: 'TESTBEDRIFT AS',
+    isCurrentEndUser: false,
+    isDeleted: true,
+    partyUuid: 'urn:altinn:organization:uuid:testbedrift-main',
+    hasOnlyAccessToSubParties: false,
+    partyId: 6,
+    dateOfBirth: null,
+  },
+  {
+    party: 'urn:altinn:organization:identifier-no:1',
+    partyType: 'Organization',
+    subParties: [],
+    name: 'Firma AS',
+    isCurrentEndUser: true,
+    isDeleted: false,
+    partyUuid: 'urn:altinn:organization:uuid:firma-as',
+    hasOnlyAccessToSubParties: false,
+    partyId: 2,
+    dateOfBirth: null,
+  },
+  {
+    party: 'urn:altinn:organization:identifier-no:4',
+    partyType: 'Organization',
+    subParties: [],
+    name: 'Abba AS',
+    isCurrentEndUser: true,
+    isDeleted: false,
+    partyUuid: 'urn:altinn:organization:uuid:firma-as',
+    hasOnlyAccessToSubParties: false,
+    partyId: 2,
+    dateOfBirth: null,
+  },
+];
+
+describe('useAccounts', () => {
+  const mockT = vi.fn((key: string) => key);
+  const mockSetSelectedPartyIds = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    (useTranslation as Mock).mockReturnValue({ t: mockT });
+    (useProfile as Mock).mockReturnValue({ favoritesGroup: { parties: [] } });
+  });
+
+  it('should return empty state when no selected parties', () => {
+    const { result } = renderHook(
+      () =>
+        useAccounts({
+          parties,
+          selectedParties: [],
+          selectedGroup: null,
+          isLoading: false,
+          partyGraph: buildPartyGraph(parties),
+          setSelectedPartyIds: mockSetSelectedPartyIds,
+        }),
+      {
+        wrapper: createCustomWrapper(),
+      },
+    );
+
+    expect(result.current.accounts).toEqual([]);
+    expect(result.current.accountGroups).toEqual({});
+    expect(result.current.accountSearch).toBeUndefined();
+  });
+
+  it('should process parties correctly with selected parties', () => {
+    const selectedParties = [parties[0]]; // TEST TESTESEN (current end user)
+
+    const { result } = renderHook(
+      () =>
+        useAccounts({
+          parties,
+          selectedParties,
+          selectedGroup: null,
+          isLoading: false,
+          partyGraph: buildPartyGraph(parties),
+          setSelectedPartyIds: mockSetSelectedPartyIds,
+        }),
+      {
+        wrapper: createCustomWrapper(),
+      },
+    );
+
+    expect(result.current.accounts.length).toBeGreaterThan(0);
+
+    // Should have current end user account
+    const endUserAccount = result.current.accounts.find((acc) => acc.isCurrentEndUser);
+    expect(endUserAccount).toBeDefined();
+    expect(endUserAccount?.name).toBe('TEST TESTESEN');
+    expect(endUserAccount?.type).toBe('person');
+    expect(endUserAccount?.badge?.label).toBe('badge.you');
+  });
+
+  it('should separate persons and organizations correctly', () => {
+    const selectedParties = parties;
+
+    const { result } = renderHook(
+      () =>
+        useAccounts({
+          parties,
+          selectedParties,
+          selectedGroup: null,
+          isLoading: false,
+          partyGraph: buildPartyGraph(parties),
+          setSelectedPartyIds: mockSetSelectedPartyIds,
+        }),
+      {
+        wrapper: createCustomWrapper(),
+      },
+    );
+
+    const personAccounts = result.current.accounts.filter((acc) => acc.type === 'person');
+    const organizationAccounts = result.current.accounts.filter((acc) => acc.type === 'company');
+
+    // Should have persons (excluding current end user from other people)
+    expect(personAccounts.length).toBeGreaterThan(0);
+
+    // Should have organizations
+    expect(organizationAccounts.length).toBeGreaterThan(0);
+  });
+
+  it('should handle deleted parties with badges', () => {
+    const selectedParties = parties;
+    (useProfile as Mock).mockReturnValue({ favoritesGroup: { parties: [] }, shouldShowDeletedEntities: true });
+
+    const { result } = renderHook(
+      () =>
+        useAccounts({
+          parties,
+          selectedParties,
+          selectedGroup: null,
+          isLoading: false,
+          partyGraph: buildPartyGraph(parties),
+          setSelectedPartyIds: mockSetSelectedPartyIds,
+        }),
+      {
+        wrapper: createCustomWrapper(),
+      },
+    );
+
+    const deletedAccounts = result.current.accounts.filter((acc) => acc.isDeleted);
+    expect(deletedAccounts.length).toBeGreaterThan(0);
+
+    for (const account of deletedAccounts) {
+      expect(account.badge?.color).toBe('neutral');
+      expect(account.badge?.label).toBe('badge.deleted');
+    }
+  });
+
+  it('should handle options correctly', () => {
+    const selectedParties = parties;
+    const options = {
+      showDescription: false,
+      showFavorites: false,
+      showGroups: true,
+    };
+
+    const { result } = renderHook(
+      () =>
+        useAccounts({
+          parties,
+          selectedParties,
+          selectedGroup: null,
+          isLoading: false,
+          partyGraph: buildPartyGraph(parties),
+          setSelectedPartyIds: mockSetSelectedPartyIds,
+          options,
+        }),
+      {
+        wrapper: createCustomWrapper(),
+      },
+    );
+
+    // When showDescription is false, accounts should not have descriptions
+    const accountsWithDescription = result.current.accounts.filter((acc) => acc.description);
+    expect(accountsWithDescription.length).toBe(0);
+  });
+});
+
+describe('formatNorwegianId', () => {
+  it('should format organization identifier with thin spaces by default', () => {
+    const result = formatNorwegianId('urn:altinn:organization:identifier-no:123456789');
+    expect(result).toBe('123\u2009456\u2009789');
+  });
+
+  it('should format organization identifier without thin spaces when requested', () => {
+    const result = formatNorwegianId('urn:altinn:organization:identifier-no:123456789', false);
+    expect(result).toBe('123456789');
+  });
+
+  it('should return empty string for person URNs', () => {
+    expect(formatNorwegianId('urn:altinn:person:identifier-no:12345678901')).toBe('');
+  });
+
+  it('should return empty string for invalid format', () => {
+    expect(formatNorwegianId('invalid-format')).toBe('');
+  });
+
+  it('should return empty string when no identifier found', () => {
+    expect(formatNorwegianId('urn:altinn:organization:identifier-no:')).toBe('');
+  });
+});

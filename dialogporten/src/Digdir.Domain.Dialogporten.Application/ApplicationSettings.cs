@@ -1,0 +1,239 @@
+﻿using Digdir.Domain.Dialogporten.Application.Common.Extensions.FluentValidation;
+using FluentValidation;
+
+namespace Digdir.Domain.Dialogporten.Application;
+
+public sealed class ApplicationSettings
+{
+    public const string ConfigurationSectionName = "Application";
+
+    public required DialogportenSettings Dialogporten { get; init; }
+    public FeatureToggle FeatureToggle { get; init; } = new();
+    public LimitsSettings Limits { get; init; } = new();
+    public BadDataHandling BadDataHandling { get; init; } = BadDataHandling.WarnAndContinue;
+}
+
+public sealed class FeatureToggle
+{
+    public bool UseAltinnAutoAuthorizedPartiesQueryParameters { get; init; }
+    public bool EnablePartyFiltersForSystemUsers { get; init; }
+    public bool EnablePartyFiltersForEmailUsers { get; init; }
+    public bool EnablePartyCacheForEmailUsers { get; init; }
+    public bool EnableGraphQlAuthorizedServiceResources { get; init; }
+    public bool UseCorrectPersonNameOrdering { get; init; }
+}
+
+public enum BadDataHandling
+{
+    WarnAndContinue,
+    Throw
+}
+
+public sealed class OpenApiSettings
+{
+    public const string ConfigurationSectionName = "OpenApi";
+
+    /// <summary>
+    /// Enable/Disable the swagger-ui/scalar try it out feature
+    /// </summary>
+    public required bool EnableTryItOut { get; init; }
+
+    /// <summary>
+    /// Prefill a clientId into swagger-ui and scalar, optional.
+    /// </summary>
+    public required string? IdportenClientId { get; init; }
+
+    /// <summary>
+    /// Swagger-ui can't clear it's session properly. It needs a logout url.
+    /// </summary>
+    public required string IdportenLogoutUrl { get; init; }
+
+    /// <summary>
+    /// Authorization URL for the OpenAPI Specification security scheme "idporten"
+    /// </summary>
+    public required string IdportenAuthorizationUrl { get; init; }
+
+    /// <summary>
+    /// Token URL for the OpenAPI Specification security scheme "idporten"
+    /// </summary>
+    public required string IdportenTokenUrl { get; init; }
+
+    /// <summary>
+    /// Token URL for the OpenAPI Specification security scheme "maskinporten"
+    /// </summary>
+    public required string MaskinportenTokenUrl { get; init; }
+}
+
+public sealed class DialogportenSettings
+{
+    public required Uri BaseUri { get; init; }
+    public required Ed25519KeyPairs Ed25519KeyPairs { get; init; }
+}
+
+public sealed class Ed25519KeyPairs
+{
+    public required Ed25519KeyPair Primary { get; init; }
+    public required Ed25519KeyPair Secondary { get; init; }
+}
+
+public sealed class Ed25519KeyPair
+{
+    public required string Kid { get; init; }
+    public required string PrivateComponent { get; init; }
+    public required string PublicComponent { get; init; }
+}
+
+public sealed class LimitsSettings
+{
+    public EndUserSearchQueryLimits EndUserSearch { get; init; } = new();
+    public ServiceOwnerSearchQueryLimits ServiceOwnerSearch { get; init; } = new();
+    public PartyResourcePruningLimits PartyResourcePruning { get; init; } = new();
+    public AuthorizedServiceResourceLimits AuthorizedServiceResources { get; init; } = new();
+}
+
+public sealed class PartyResourcePruningLimits
+{
+    public int MaxPartiesCachingThreshold { get; init; } = 1500; // 0 means no limit.
+    public int MinResourcesPruningThreshold { get; init; } = 5;
+}
+
+public sealed class AuthorizedServiceResourceLimits
+{
+    /// <summary>
+    /// On an UNFILTERED authorized-service-resources request, if the caller is authorized to more parties than
+    /// this, return the full referenced catalogue instead of computing the per-party authorized union. This caps
+    /// the work for users with very many parties (where the per-party pruning query is expensive). 0 disables the
+    /// fallback. This must take effect no later than
+    /// <see cref="PartyResourcePruningLimits.MaxPartiesCachingThreshold"/> (above that threshold the per-party
+    /// pruning query still runs but its results are not written to the per-party cache, so the fallback must trip
+    /// first to keep such callers off the uncached multi-party query path). That relationship is not enforced by
+    /// configuration validation; instead <c>AuthorizedServiceResourcesProvider</c> clamps this limit down to the
+    /// caching threshold at runtime when the threshold is the lower of the two.
+    /// </summary>
+    public int MaxAuthorizedPartiesBeforeFullCatalogue { get; init; } = 1000;
+}
+
+public sealed class EndUserSearchQueryLimits
+{
+    public int MaxPartyFilterValues { get; init; } = 100;
+    public int MaxServiceResourceFilterValues { get; init; } = 20;
+    public int MaxOrgFilterValues { get; init; } = 20;
+    public int MaxExtendedStatusFilterValues { get; init; } = 20;
+    public int MinServiceDrivenStrategyPartyCount { get; init; } = 100;
+
+    /// <summary>
+    /// Server-side statement_timeout (seconds) applied to all end-user search queries (free-text and
+    /// otherwise). Bounds the worst case — a broad search with no narrowing — which is otherwise unbounded
+    /// (a common term's GIN scan or a wide service/party-driven scan can't be limited). On timeout the
+    /// query is cancelled and surfaced as a 422 telling the caller to narrow the search. Set to 0 to disable.
+    /// </summary>
+    public int SearchStatementTimeoutSeconds { get; init; } = 20;
+}
+
+public sealed class ServiceOwnerSearchQueryLimits
+{
+    public int MaxPartyFilterValues { get; init; } = 20;
+    public int MaxServiceResourceFilterValues { get; init; } = 20;
+    public int MaxExtendedStatusFilterValues { get; init; } = 20;
+}
+
+internal sealed class ApplicationSettingsValidator : AbstractValidator<ApplicationSettings>
+{
+    public ApplicationSettingsValidator(
+        IValidator<DialogportenSettings> dialogportenSettingsValidator,
+        IValidator<LimitsSettings> limitsSettingsValidator)
+    {
+        RuleFor(x => x.Dialogporten)
+            .NotEmpty()
+            .SetValidator(dialogportenSettingsValidator);
+
+        RuleFor(x => x.Limits)
+            .NotEmpty()
+            .SetValidator(limitsSettingsValidator);
+    }
+}
+
+internal sealed class DialogportenSettingsValidator : AbstractValidator<DialogportenSettings>
+{
+    public DialogportenSettingsValidator()
+    {
+        RuleFor(x => x.BaseUri).NotEmpty().IsValidUri();
+    }
+}
+
+internal sealed class LimitsSettingsValidator : AbstractValidator<LimitsSettings>
+{
+    public LimitsSettingsValidator(
+        IValidator<EndUserSearchQueryLimits> endUserSearchValidator,
+        IValidator<ServiceOwnerSearchQueryLimits> serviceOwnerSearchValidator,
+        IValidator<PartyResourcePruningLimits> partyResourcePruningValidator,
+        IValidator<AuthorizedServiceResourceLimits> authorizedServiceResourceValidator)
+    {
+        RuleFor(x => x.EndUserSearch)
+            .NotEmpty()
+            .SetValidator(endUserSearchValidator);
+
+        RuleFor(x => x.ServiceOwnerSearch)
+            .NotEmpty()
+            .SetValidator(serviceOwnerSearchValidator);
+
+        RuleFor(x => x.PartyResourcePruning)
+            .NotEmpty()
+            .SetValidator(partyResourcePruningValidator);
+
+        RuleFor(x => x.AuthorizedServiceResources)
+            .NotEmpty()
+            .SetValidator(authorizedServiceResourceValidator);
+
+        // Note: the relationship between AuthorizedServiceResources.MaxAuthorizedPartiesBeforeFullCatalogue and
+        // PartyResourcePruning.MaxPartiesCachingThreshold is intentionally NOT validated here. The provider
+        // reconciles them at runtime by clamping the fallback limit down to the (lower) caching threshold, so a
+        // misordered configuration cannot reopen the uncached multi-party path. See AuthorizedServiceResourceLimits
+        // and AuthorizedServiceResourcesProvider.
+    }
+}
+
+internal sealed class AuthorizedServiceResourceLimitsValidator : AbstractValidator<AuthorizedServiceResourceLimits>
+{
+    public AuthorizedServiceResourceLimitsValidator()
+    {
+        RuleFor(x => x.MaxAuthorizedPartiesBeforeFullCatalogue)
+            .GreaterThanOrEqualTo(0);
+    }
+}
+
+internal sealed class EndUserSearchQueryLimitsValidator : AbstractValidator<EndUserSearchQueryLimits>
+{
+    public EndUserSearchQueryLimitsValidator()
+    {
+        RuleFor(x => x.MaxPartyFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+        RuleFor(x => x.MaxServiceResourceFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+        RuleFor(x => x.MaxOrgFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+        RuleFor(x => x.MaxExtendedStatusFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+        RuleFor(x => x.MinServiceDrivenStrategyPartyCount).GreaterThanOrEqualTo(0);
+        RuleFor(x => x.SearchStatementTimeoutSeconds).GreaterThanOrEqualTo(0).LessThanOrEqualTo(600);
+    }
+}
+
+internal sealed class ServiceOwnerSearchQueryLimitsValidator : AbstractValidator<ServiceOwnerSearchQueryLimits>
+{
+    public ServiceOwnerSearchQueryLimitsValidator()
+    {
+        RuleFor(x => x.MaxPartyFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+        RuleFor(x => x.MaxServiceResourceFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+        RuleFor(x => x.MaxExtendedStatusFilterValues).GreaterThan(0).LessThanOrEqualTo(1000);
+    }
+}
+
+internal sealed class PartyResourcePruningLimitsValidator : AbstractValidator<PartyResourcePruningLimits>
+{
+    public PartyResourcePruningLimitsValidator()
+    {
+        RuleFor(x => x.MaxPartiesCachingThreshold)
+            .GreaterThanOrEqualTo(0);
+
+        RuleFor(x => x.MinResourcesPruningThreshold)
+            .GreaterThanOrEqualTo(0)
+            .LessThanOrEqualTo(1000);
+    }
+}

@@ -1,0 +1,205 @@
+﻿# Deploys the created release to staging
+name: CI/CD Staging
+run-name: CI/CD Staging ${{ github.event.client_payload.version && format('({0})', github.event.client_payload.version) || '' }}
+
+on:
+  repository_dispatch:
+    types: [release_created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  generate-git-short-sha:
+    name: Generate git short sha
+    uses: ./.github/workflows/workflow-generate-git-short-sha.yml
+
+  get-versions-from-github:
+    name: Get Latest Deployed Version Info from GitHub
+    uses: ./.github/workflows/workflow-get-latest-deployed-version-info-from-github.yml
+    with:
+      environment: staging
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+
+  check-for-changes:
+    name: Check for changes
+    needs: [get-versions-from-github]
+    uses: ./.github/workflows/workflow-check-for-changes.yml
+    with:
+      infra_base_sha: ${{ needs.get-versions-from-github.outputs.infra_version_sha }}
+      apps_base_sha: ${{ needs.get-versions-from-github.outputs.apps_version_sha }}
+
+  deploy-infra:
+    name: Deploy infra to staging
+    if: ${{ needs.check-for-changes.outputs.hasInfraChanges == 'true' }}
+    needs: [check-for-changes]
+    uses: ./.github/workflows/workflow-deploy-infra.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_NAME: ${{ secrets.AZURE_SOURCE_KEY_VAULT_NAME }}
+      AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP: ${{ secrets.AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP }}
+      AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY }}
+    with:
+      environment: staging
+      region: norwayeast
+      version: ${{ github.event.client_payload.version }}
+      ref: "refs/tags/v${{ github.event.client_payload.version }}"
+
+  store-infra-version:
+    name: Store Latest Deployed Infra Version as GitHub Variable
+    needs: [deploy-infra]
+    if: ${{ needs.deploy-infra.result == 'success' }}
+    uses: ./.github/workflows/workflow-store-github-env-variable.yml
+    with:
+      variable_name: LATEST_DEPLOYED_INFRA_VERSION
+      variable_value: ${{ github.event.client_payload.version }}
+      environment: staging
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+
+  deploy-apps:
+    name: Deploy apps to staging
+    needs: [check-for-changes, deploy-infra]
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasBackendChanges == 'true' }}
+    uses: ./.github/workflows/workflow-deploy-apps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+      AZURE_APP_INSIGHTS_CONNECTION_STRING: ${{ secrets.AZURE_APP_INSIGHTS_CONNECTION_STRING }}
+      AZURE_APP_CONFIGURATION_NAME: ${{ secrets.AZURE_APP_CONFIGURATION_NAME }}
+      AZURE_SERVICE_BUS_NAMESPACE_NAME: ${{ secrets.AZURE_SERVICE_BUS_NAMESPACE_NAME }}
+    with:
+      environment: staging
+      version: ${{ github.event.client_payload.version }}
+      runMigration: ${{ needs.check-for-changes.outputs.hasMigrationChanges == 'true' }}
+      ref: "refs/tags/v${{ github.event.client_payload.version }}"
+
+  update-manifests:
+    name: Update manifest image tags for tt02
+    needs: [check-for-changes, deploy-infra]
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasBackendChanges == 'true' }}
+    uses: ./.github/workflows/workflow-dispatch-update-manifests.yml
+    with:
+      environment: tt02
+      image_tag: ${{ github.event.client_payload.version }}
+    secrets:
+      MANIFESTS_PAT: ${{ secrets.MANIFESTS_PAT }}
+
+  tag-issues-with-environment:
+    name: Tag deployed PRs and issues for staging
+    needs: [ deploy-apps, deploy-infra ]
+    if: ${{ always() && !failure() && !cancelled() && (needs.deploy-apps.outputs.deployment_executed == 'true' || needs.deploy-infra.outputs.deployment_executed == 'true') }}
+    uses: ./.github/workflows/workflow-tag-issues-with-environment.yml
+    with:
+      environment-label: tt02
+      version: ${{ github.event.client_payload.version }}
+
+  publish-sdk-to-nuget:
+    uses: ./.github/workflows/workflow-publish-nuget.yml
+    needs: [ deploy-apps, check-for-changes, generate-git-short-sha ]
+    if: ${{ always() && !failure() && !cancelled() && ( needs.check-for-changes.outputs.hasSwaggerSchemaChanges == 'true' || needs.check-for-changes.outputs.hasWebApiClientChanges == 'true' )}}
+    with:
+      version: ${{ github.event.client_payload.version }}-rc+${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+      path: 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient/Digdir.Library.Dialogporten.WebApiClient.csproj'
+      source: 'https://api.nuget.org/v3/index.json'
+    secrets:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    permissions:
+      contents: read
+      packages: write
+
+  store-apps-version:
+    name: Store Latest Deployed Apps Version as GitHub Variable
+    needs: [deploy-apps]
+    if: ${{ always() && !failure() && needs.deploy-apps.outputs.deployment_executed == 'true' }}
+    uses: ./.github/workflows/workflow-store-github-env-variable.yml
+    with:
+      variable_name: LATEST_DEPLOYED_APPS_VERSION
+      variable_value: ${{ github.event.client_payload.version }}
+      environment: staging
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+
+  run-e2e-tests:
+    name: "Run K6 functional end-to-end tests"
+    # we want the end-to-end tests to be dependent on deployment of infrastructure and apps, but if infrastructure is skipped, we still want to run the tests
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasBackendChanges == 'true' }}
+    needs: [deploy-apps, check-for-changes]
+    uses: ./.github/workflows/workflow-run-k6-tests.yml
+    secrets:
+      TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+      TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+    with:
+      environment: staging
+      apiVersion: v1
+      testSuitePath: tests/k6/suites/all-single-pass.js
+      ref: "refs/tags/v${{ github.event.client_payload.version }}"
+    permissions:
+      checks: write
+      pull-requests: write
+
+  run-graphql-e2e-tests:
+    name: "Run GraphQL E2E tests"
+    if: ${{ always() && !failure() && !cancelled() && (needs.check-for-changes.outputs.hasBackendChanges == 'true' || needs.check-for-changes.outputs.hasTestChanges == 'true') }}
+    needs: [ run-e2e-tests, check-for-changes ]
+    uses: ./.github/workflows/workflow-run-graphql-e2e-tests.yml
+    secrets:
+      TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+      TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+    with:
+      environment: staging
+      ref: "refs/tags/v${{ github.event.client_payload.version }}"
+
+  run-webapi-e2e-tests:
+    name: "Run WebAPI E2E tests"
+    if: ${{ always() && !failure() && !cancelled() && (needs.check-for-changes.outputs.hasBackendChanges == 'true' || needs.check-for-changes.outputs.hasTestChanges == 'true') }}
+    needs: [ run-e2e-tests, check-for-changes ]
+    uses: ./.github/workflows/workflow-run-webapi-e2e-tests.yml
+    secrets:
+      TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+      TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+    with:
+      environment: staging
+      ref: "refs/tags/v${{ github.event.client_payload.version }}"
+
+  send-slack-message-on-failure:
+    name: Send Slack message on failure
+    needs: [deploy-infra, deploy-apps, tag-issues-with-environment, run-e2e-tests, run-graphql-e2e-tests, run-webapi-e2e-tests]
+    if: ${{ always() && failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-send-ci-cd-status-slack-message.yml
+    with:
+      environment: staging
+      infra_status: ${{ needs.deploy-infra.result }}
+      apps_status: ${{ needs.deploy-apps.result }}
+      e2e_tests_status: ${{ needs.run-e2e-tests.result }}
+      graphql_e2e_tests_status: ${{ needs.run-graphql-e2e-tests.result }}
+      webapi_e2e_tests_status: ${{ needs.run-webapi-e2e-tests.result }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID_FOR_CI_CD_STATUS }}
+
+  send-deployment-to-swarmia:
+    name: Send deployment to Swarmia
+    if: ${{ always() && !failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-swarmia-deployment.yml
+    needs: [ deploy-infra, deploy-apps ]
+    with:
+      app-name: dialogporten
+      environment: 'staging'
+      version: ${{ github.event.client_payload.version }}
+    secrets:
+      token: ${{ secrets.SWARMIA_DEPLOYMENTS_AUTHORIZATION }}

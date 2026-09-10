@@ -1,0 +1,751 @@
+using AwesomeAssertions;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Content;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Localizations;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Common;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Common;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Common.ApplicationFlow;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Features.V1.Common.Extensions;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence;
+using Microsoft.Extensions.DependencyInjection;
+using NSubstitute;
+using static Digdir.Domain.Dialogporten.Application.Integration.Tests.Common.Common;
+using Constants = Digdir.Domain.Dialogporten.Application.Common.Authorization.Constants;
+using GetDialogLookupQuery = Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.DialogLookup.Queries.Get.GetDialogLookupQuery;
+using EndUserIdentifierLookupDto = Digdir.Domain.Dialogporten.Application.Features.V1.Common.IdentifierLookup.EndUserIdentifierLookupDto;
+using IdentifierLookupGrantType = Digdir.Domain.Dialogporten.Application.Features.V1.Common.IdentifierLookup.IdentifierLookupGrantType;
+
+namespace Digdir.Domain.Dialogporten.Application.Integration.Tests.Features.V1.EndUser.DialogLookup.Queries.Get;
+
+[Collection(nameof(DialogCqrsCollectionFixture))]
+public class GetDialogLookupTests(DialogApplication application) : ApplicationCollectionFixture(application)
+{
+    [Fact]
+    public Task Get_Should_Return_NotFound_For_Deleted_Dialog() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog((x, _) => x.AddServiceOwnerLabels($"urn:altinn:integration:storage:1337/{Guid.NewGuid()}"))
+            .DeleteDialog()
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}"
+            })
+            .ExecuteAndAssert<EntityNotFound>(_ => { });
+
+    [Fact]
+    public Task Get_By_Label_Should_Pick_Newest_NonDeleted_Dialog_For_EndUser()
+    {
+        var instanceId = Guid.NewGuid();
+        var instanceRef = $"urn:altinn:instance-id:1337/{instanceId}";
+        var storageLabel = $"urn:altinn:integration:storage:1337/{instanceId}";
+        var olderDialogId = NewUuidV7();
+        var newerDeletedDialogId = NewUuidV7();
+
+        return FlowBuilder.For(Application)
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = olderDialogId;
+                x.AddServiceOwnerLabels(storageLabel);
+            })
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = newerDeletedDialogId;
+                x.AddServiceOwnerLabels(storageLabel);
+            })
+            .DeleteDialog()
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = instanceRef
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.DialogId.Should().Be(olderDialogId);
+                result.InstanceRef.Should().Be(instanceRef.ToLowerInvariant());
+            });
+    }
+
+    [Fact]
+    public async Task Get_By_AppInstanceRef_Should_Throw_When_Multiple_Labels_Match()
+    {
+        var instanceId = Guid.NewGuid();
+        var instanceRef = $"urn:altinn:instance-id:1337/{instanceId}";
+        var storageLabel = $"urn:altinn:integration:storage:1337/{instanceId}";
+        var firstDialogId = NewUuidV7();
+        var secondDialogId = NewUuidV7();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            FlowBuilder.For(Application)
+                .CreateSimpleDialog((x, _) =>
+                {
+                    x.Dto.Id = firstDialogId;
+                    x.AddServiceOwnerLabels(storageLabel);
+                })
+                .CreateSimpleDialog((x, _) =>
+                {
+                    x.Dto.Id = secondDialogId;
+                    x.AddServiceOwnerLabels(storageLabel);
+                })
+                .SendCommand(_ => new GetDialogLookupQuery
+                {
+                    InstanceRef = instanceRef
+                })
+                .ExecuteAsync());
+    }
+
+    [Fact]
+    public Task Get_By_CorrespondenceRef_Should_Return_Matching_Dialog()
+    {
+        var correspondenceId = Guid.NewGuid();
+        var correspondenceRef = $"urn:altinn:correspondence-id:{correspondenceId}";
+        var party = Party;
+
+        return FlowBuilder.For(Application)
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Party = party;
+                x.AddServiceOwnerLabels(correspondenceRef);
+            })
+            .SendCommand((_, _) => new GetDialogLookupQuery
+            {
+                InstanceRef = correspondenceRef
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>((result, ctx) =>
+            {
+                result.DialogId.Should().Be(ctx.GetDialogId());
+                result.InstanceRef.Should().Be(correspondenceRef.ToLowerInvariant());
+                result.Party.Should().Be(party);
+            });
+    }
+
+    [Fact]
+    public Task Get_By_DialogRef_Should_Prefer_AppInstanceRef_Then_CorrespondenceRef()
+    {
+        var instanceId = Guid.NewGuid();
+        var appInstanceRef = $"urn:altinn:instance-id:1337/{instanceId}";
+        var storageLabel = $"urn:altinn:integration:storage:1337/{instanceId}";
+        var correspondenceRef = $"urn:altinn:correspondence-id:{Guid.NewGuid()}";
+
+        return FlowBuilder.For(Application)
+            .CreateSimpleDialog((x, _) => x.AddServiceOwnerLabels(correspondenceRef, storageLabel))
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+                result.InstanceRef.Should().Be(appInstanceRef.ToLowerInvariant()));
+    }
+
+    [Fact]
+    public Task Get_Should_Return_Forbidden_When_EndUser_Has_No_Access() =>
+        FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization.GetAuthorizedPartiesForLookup(
+                        null!,
+                        Arg.Any<List<string>>(),
+                        Arg.Any<CancellationToken>())
+                    .ReturnsForAnyArgs(new AuthorizedPartiesResult { AuthorizedParties = [] });
+
+                altinnAuthorization.UserHasRequiredAuthLevel(
+                        Arg.Any<string>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(true);
+            })
+            .CreateSimpleDialog((x, _) => x.AddServiceOwnerLabels($"urn:altinn:integration:storage:1337/{Guid.NewGuid()}"))
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}"
+            })
+            .ExecuteAndAssert<Forbidden>(_ => { });
+
+    [Fact]
+    public Task Get_Should_Return_NonSensitiveTitle_As_Title_When_EndUser_Auth_Level_Is_Too_Low()
+    {
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-auth-level-too-low";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+                ConfigureLookupAccessViaResourceDelegation(altinnAuthorization, party, serviceResource))
+            .AsIntegrationTestUser(x => x.WithClaim(
+                ClaimsPrincipalExtensions.IdportenAuthLevelClaim,
+                Constants.IdportenLoaSubstantial))
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+                x.Dto.Content!.Title.Value =
+                [
+                    new LocalizationDto { LanguageCode = "nb", Value = "Gradert tittel" }
+                ];
+                x.Dto.Content.NonSensitiveTitle = new ContentValueDto
+                {
+                    Value =
+                    [
+                        new LocalizationDto { LanguageCode = "nb", Value = "Ugradert tittel" }
+                    ]
+                };
+            })
+            .Do(async (_, ctx) => await SeedMinimumAuthenticationLevel(ctx, serviceResource, minimumAuthenticationLevel: 4))
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.Title.Should().ContainSingle();
+                result.Title[0].Value.Should().Be("Ugradert tittel");
+                result.AuthorizationEvidence.CurrentAuthenticationLevel.Should().Be(3);
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Fall_Back_To_Title_When_EndUser_Auth_Level_Is_Too_Low_And_NonSensitiveTitle_Is_Not_Set()
+    {
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-auth-level-title-fallback";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+                ConfigureLookupAccessViaResourceDelegation(altinnAuthorization, party, serviceResource))
+            .AsIntegrationTestUser(x => x.WithClaim(
+                ClaimsPrincipalExtensions.IdportenAuthLevelClaim,
+                Constants.IdportenLoaSubstantial))
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+                x.Dto.Content!.Title.Value =
+                [
+                    new LocalizationDto { LanguageCode = "nb", Value = "Gradert tittel" }
+                ];
+                x.Dto.Content.NonSensitiveTitle = null;
+            })
+            .Do(async (_, ctx) => await SeedMinimumAuthenticationLevel(ctx, serviceResource, minimumAuthenticationLevel: 4))
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.Title.Should().ContainSingle();
+                result.Title[0].Value.Should().Be("Gradert tittel");
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Return_Title_When_EndUser_Auth_Level_Is_Sufficient_Even_If_NonSensitiveTitle_Is_Set()
+    {
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-auth-level-sufficient";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+                ConfigureLookupAccessViaResourceDelegation(altinnAuthorization, party, serviceResource))
+            .AsIntegrationTestUser(x => x.WithClaim(
+                ClaimsPrincipalExtensions.IdportenAuthLevelClaim,
+                Constants.IdportenLoaHigh))
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+                x.Dto.Content!.Title.Value =
+                [
+                    new LocalizationDto { LanguageCode = "nb", Value = "Gradert tittel" }
+                ];
+                x.Dto.Content.NonSensitiveTitle = new ContentValueDto
+                {
+                    Value =
+                    [
+                        new LocalizationDto { LanguageCode = "nb", Value = "Ugradert tittel" }
+                    ]
+                };
+            })
+            .Do(async (_, ctx) => await SeedMinimumAuthenticationLevel(ctx, serviceResource, minimumAuthenticationLevel: 4))
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.Title.Should().ContainSingle();
+                result.Title[0].Value.Should().Be("Gradert tittel");
+                result.AuthorizationEvidence.CurrentAuthenticationLevel.Should().Be(4);
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Prune_Selected_Title_When_AcceptLanguage_Is_Set()
+    {
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-title-pruning";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+                ConfigureLookupAccessViaResourceDelegation(altinnAuthorization, party, serviceResource))
+            .AsIntegrationTestUser(x => x.WithClaim(
+                ClaimsPrincipalExtensions.IdportenAuthLevelClaim,
+                Constants.IdportenLoaSubstantial))
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+                x.Dto.Content!.Title.Value =
+                [
+                    new LocalizationDto { LanguageCode = "nb", Value = "Gradert tittel" },
+                    new LocalizationDto { LanguageCode = "en", Value = "Sensitive title" }
+                ];
+                x.Dto.Content.NonSensitiveTitle = new ContentValueDto
+                {
+                    Value =
+                    [
+                        new LocalizationDto { LanguageCode = "nb", Value = "Ugradert tittel" },
+                        new LocalizationDto { LanguageCode = "en", Value = "Non-sensitive title" }
+                    ]
+                };
+            })
+            .Do(async (_, ctx) => await SeedMinimumAuthenticationLevel(ctx, serviceResource, minimumAuthenticationLevel: 4))
+            .SendCommand((_, ctx) => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{ctx.GetDialogId()}",
+                AcceptedLanguages = [new AcceptedLanguage("en", 100)]
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.Title.Should().ContainSingle();
+                result.Title[0].LanguageCode.Should().Be("en");
+                result.Title[0].Value.Should().Be("Non-sensitive title");
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Set_ViaInstanceDelegation_From_AuthorizedPartiesInstances()
+    {
+        var dialogId = NewUuidV7();
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-a";
+        const string otherServiceResource = "urn:altinn:resource:test-service-b";
+        var instanceId = Guid.NewGuid();
+        var instanceRef = $"urn:altinn:instance-id:1337/{instanceId}";
+        var storageLabel = $"urn:altinn:integration:storage:1337/{instanceId}";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization.GetAuthorizedPartiesForLookup(
+                        null!,
+                        Arg.Any<List<string>>(),
+                        Arg.Any<CancellationToken>())
+                    .ReturnsForAnyArgs(new AuthorizedPartiesResult
+                    {
+                        AuthorizedParties =
+                        [
+                            new AuthorizedParty
+                            {
+                                Party = party,
+                                PartyUuid = Guid.NewGuid(),
+                                PartyId = 0,
+                                Name = "Party",
+                                DateOfBirth = null,
+                                PartyType = AuthorizedPartyType.Person,
+                                IsDeleted = false,
+                                HasKeyRole = false,
+                                IsCurrentEndUser = false,
+                                IsMainAdministrator = false,
+                                IsAccessManager = false,
+                                HasOnlyAccessToSubParties = false,
+                                AuthorizedResources = [],
+                                AuthorizedRolesAndAccessPackages = [],
+                                AuthorizedInstances =
+                                [
+                                    new AuthorizedResource
+                                    {
+                                        ResourceId = otherServiceResource[Domain.Common.Constants.ServiceResourcePrefix.Length..],
+                                        InstanceId = instanceId.ToString(),
+                                        InstanceRef = instanceRef
+                                    },
+                                    new AuthorizedResource
+                                    {
+                                        ResourceId = serviceResource[Domain.Common.Constants.ServiceResourcePrefix.Length..],
+                                        InstanceId = instanceId.ToString(),
+                                        InstanceRef = instanceRef
+                                    }
+                                ],
+                                SubParties = null,
+                                ParentParty = null
+                            }
+                        ]
+                    });
+
+                altinnAuthorization.UserHasRequiredAuthLevel(
+                        Arg.Any<string>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(true);
+            })
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = dialogId;
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+                x.AddServiceOwnerLabels(storageLabel);
+            })
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{dialogId}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.AuthorizationEvidence.ViaInstanceDelegation.Should().BeTrue();
+                result.AuthorizationEvidence.Evidence
+                    .Should()
+                    .ContainSingle(x =>
+                        x.GrantType == IdentifierLookupGrantType.InstanceDelegation
+                        && x.Subject == instanceRef);
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Return_Forbidden_When_Only_Request_InstanceRef_Is_Authorized_For_InstanceDelegation()
+    {
+        var dialogId = NewUuidV7();
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-dialog-ref-delegation";
+        var instanceId = Guid.NewGuid();
+        var requestDialogRef = $"urn:altinn:dialog-id:{dialogId}";
+        var storageLabel = $"urn:altinn:integration:storage:1337/{instanceId}";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization.GetAuthorizedPartiesForLookup(
+                        null!,
+                        Arg.Any<List<string>>(),
+                        Arg.Any<CancellationToken>())
+                    .ReturnsForAnyArgs(new AuthorizedPartiesResult
+                    {
+                        AuthorizedParties =
+                        [
+                            new AuthorizedParty
+                            {
+                                Party = party,
+                                PartyUuid = Guid.NewGuid(),
+                                PartyId = 0,
+                                Name = "Party",
+                                DateOfBirth = null,
+                                PartyType = AuthorizedPartyType.Person,
+                                IsDeleted = false,
+                                HasKeyRole = false,
+                                IsCurrentEndUser = false,
+                                IsMainAdministrator = false,
+                                IsAccessManager = false,
+                                HasOnlyAccessToSubParties = false,
+                                AuthorizedResources = [],
+                                AuthorizedRolesAndAccessPackages = [],
+                                AuthorizedInstances =
+                                [
+                                    new AuthorizedResource
+                                    {
+                                        ResourceId = serviceResource[Domain.Common.Constants.ServiceResourcePrefix.Length..],
+                                        InstanceId = dialogId.ToString(),
+                                        InstanceRef = requestDialogRef
+                                    }
+                                ],
+                                SubParties = null,
+                                ParentParty = null
+                            }
+                        ]
+                    });
+
+                altinnAuthorization.UserHasRequiredAuthLevel(
+                        Arg.Any<string>(),
+                        Arg.Any<CancellationToken>())
+                    .Returns(true);
+            })
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = dialogId;
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+                x.AddServiceOwnerLabels(storageLabel);
+            })
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = requestDialogRef
+            })
+            .ExecuteAndAssert<Forbidden>(_ => { });
+    }
+
+    [Fact]
+    public Task Get_Should_Set_ViaRole_From_AuthorizedPartiesSubjects()
+    {
+        var dialogId = NewUuidV7();
+        var party = Party;
+        const string serviceResource = "urn:altinn:resource:test-service-role";
+        const string roleSubject = $"{AltinnAuthorizationConstants.RolePrefix}DIALOG_READ";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization.GetAuthorizedPartiesForLookup(
+                        null!,
+                        Arg.Any<List<string>>(),
+                        Arg.Any<CancellationToken>())
+                    .ReturnsForAnyArgs(new AuthorizedPartiesResult
+                    {
+                        AuthorizedParties =
+                        [
+                            new AuthorizedParty
+                            {
+                                Party = party,
+                                PartyUuid = Guid.NewGuid(),
+                                PartyId = 0,
+                                Name = "Party",
+                                DateOfBirth = null,
+                                PartyType = AuthorizedPartyType.Person,
+                                IsDeleted = false,
+                                HasKeyRole = false,
+                                IsCurrentEndUser = false,
+                                IsMainAdministrator = false,
+                                IsAccessManager = false,
+                                HasOnlyAccessToSubParties = false,
+                                AuthorizedResources = [],
+                                AuthorizedRolesAndAccessPackages = [roleSubject],
+                                AuthorizedInstances = [],
+                                SubParties = null,
+                                ParentParty = null
+                            }
+                        ]
+                    });
+            })
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = dialogId;
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+            })
+            .Do(async (_, ctx) => await SeedMinimumAuthenticationLevel(ctx, serviceResource, minimumAuthenticationLevel: 4))
+            .SeedSubjectResources(serviceResource, [roleSubject])
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{dialogId}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.ServiceResource.MinimumAuthenticationLevel.Should().Be(4);
+                result.AuthorizationEvidence.ViaRole.Should().BeTrue();
+                result.AuthorizationEvidence.ViaAccessPackage.Should().BeFalse();
+                result.AuthorizationEvidence.ViaResourceDelegation.Should().BeFalse();
+                result.AuthorizationEvidence.ViaInstanceDelegation.Should().BeFalse();
+                result.AuthorizationEvidence.Evidence
+                    .Should()
+                    .ContainSingle(x =>
+                        x.GrantType == IdentifierLookupGrantType.Role
+                        && x.Subject == roleSubject);
+                var evidence = result.AuthorizationEvidence.Evidence.Single(x => x.GrantType == IdentifierLookupGrantType.Role);
+                evidence.Name.Should().ContainSingle(x => x.LanguageCode == "nb" && x.Value == "Dialogleser");
+                evidence.Links.Should().NotBeNull();
+                evidence.Links.Metadata.Should().Be("https://platform.example/accessmanagement/api/v1/meta/info/roles/11111111-1111-1111-1111-111111111111");
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Set_ViaAccessPackage_From_AuthorizedPartiesSubjects()
+    {
+        var dialogId = NewUuidV7();
+        var party = Party;
+        var serviceResource = "urn:altinn:resource:test-service-access-package";
+        var accessPackageSubject = $"{AltinnAuthorizationConstants.AccessPackagePrefix}dialog_lookup_package";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization.GetAuthorizedPartiesForLookup(
+                        null!,
+                        Arg.Any<List<string>>(),
+                        Arg.Any<CancellationToken>())
+                    .ReturnsForAnyArgs(new AuthorizedPartiesResult
+                    {
+                        AuthorizedParties =
+                        [
+                            new AuthorizedParty
+                            {
+                                Party = party,
+                                PartyUuid = Guid.NewGuid(),
+                                PartyId = 0,
+                                Name = "Party",
+                                DateOfBirth = null,
+                                PartyType = AuthorizedPartyType.Person,
+                                IsDeleted = false,
+                                HasKeyRole = false,
+                                IsCurrentEndUser = false,
+                                IsMainAdministrator = false,
+                                IsAccessManager = false,
+                                HasOnlyAccessToSubParties = false,
+                                AuthorizedResources = [],
+                                AuthorizedRolesAndAccessPackages = [accessPackageSubject],
+                                AuthorizedInstances = [],
+                                SubParties = null,
+                                ParentParty = null
+                            }
+                        ]
+                    });
+            })
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = dialogId;
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+            })
+            .SeedSubjectResources(serviceResource, [accessPackageSubject])
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{dialogId}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.AuthorizationEvidence.ViaRole.Should().BeFalse();
+                result.AuthorizationEvidence.ViaAccessPackage.Should().BeTrue();
+                result.AuthorizationEvidence.ViaResourceDelegation.Should().BeFalse();
+                result.AuthorizationEvidence.ViaInstanceDelegation.Should().BeFalse();
+                result.AuthorizationEvidence.Evidence
+                    .Should()
+                    .ContainSingle(x =>
+                        x.GrantType == IdentifierLookupGrantType.AccessPackage
+                        && x.Subject == accessPackageSubject);
+                var evidence = result.AuthorizationEvidence.Evidence.Single(x => x.GrantType == IdentifierLookupGrantType.AccessPackage);
+                evidence.Name.Should().ContainSingle(x => x.LanguageCode == "nb" && x.Value == "Dialogoppslagspakke");
+                evidence.Links.Should().NotBeNull();
+                evidence.Links.Metadata.Should().Be("https://platform.example/accessmanagement/api/v1/meta/info/accesspackages/package/urn/urn:altinn:accesspackage:dialog_lookup_package");
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Set_ViaResourceDelegation_From_AuthorizedPartiesResources()
+    {
+        var dialogId = NewUuidV7();
+        var party = Party;
+        var serviceResource = "urn:altinn:resource:test-service-resource-delegation";
+
+        return FlowBuilder.For(Application)
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization.GetAuthorizedPartiesForLookup(
+                        null!,
+                        Arg.Any<List<string>>(),
+                        Arg.Any<CancellationToken>())
+                    .ReturnsForAnyArgs(new AuthorizedPartiesResult
+                    {
+                        AuthorizedParties =
+                        [
+                            new AuthorizedParty
+                            {
+                                Party = party,
+                                PartyUuid = Guid.NewGuid(),
+                                PartyId = 0,
+                                Name = "Party",
+                                DateOfBirth = null,
+                                PartyType = AuthorizedPartyType.Person,
+                                IsDeleted = false,
+                                HasKeyRole = false,
+                                IsCurrentEndUser = false,
+                                IsMainAdministrator = false,
+                                IsAccessManager = false,
+                                HasOnlyAccessToSubParties = false,
+                                AuthorizedResources = [serviceResource],
+                                AuthorizedRolesAndAccessPackages = [],
+                                AuthorizedInstances = [],
+                                SubParties = null,
+                                ParentParty = null
+                            }
+                        ]
+                    });
+            })
+            .CreateSimpleDialog((x, _) =>
+            {
+                x.Dto.Id = dialogId;
+                x.Dto.Party = party;
+                x.Dto.ServiceResource = serviceResource;
+            })
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:dialog-id:{dialogId}"
+            })
+            .ExecuteAndAssert<EndUserIdentifierLookupDto>(result =>
+            {
+                result.AuthorizationEvidence.ViaRole.Should().BeFalse();
+                result.AuthorizationEvidence.ViaAccessPackage.Should().BeFalse();
+                result.AuthorizationEvidence.ViaResourceDelegation.Should().BeTrue();
+                result.AuthorizationEvidence.ViaInstanceDelegation.Should().BeFalse();
+                result.AuthorizationEvidence.Evidence
+                    .Should()
+                    .ContainSingle(x =>
+                        x.GrantType == IdentifierLookupGrantType.ResourceDelegation
+                        && x.Subject == serviceResource);
+            });
+    }
+
+    [Fact]
+    public Task Get_Should_Return_ValidationError_For_Unsupported_InstanceRef() =>
+        FlowBuilder.For(Application)
+            .SendCommand(_ => new GetDialogLookupQuery
+            {
+                InstanceRef = $"urn:altinn:unsupported:{Guid.NewGuid()}"
+            })
+            .ExecuteAndAssert<ValidationError>(result =>
+                result.Errors.Should().ContainSingle());
+
+    private static async Task SeedMinimumAuthenticationLevel(
+        FlowContext ctx,
+        string serviceResource,
+        int minimumAuthenticationLevel)
+    {
+        using var scope = ctx.Application.GetServiceProvider().CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<DialogDbContext>();
+
+        db.ResourcePolicyInformation.Add(new()
+        {
+            Resource = serviceResource,
+            MinimumAuthenticationLevel = minimumAuthenticationLevel
+        });
+
+        await db.SaveChangesAsync(TestContext.Current.CancellationToken);
+    }
+
+    private static void ConfigureLookupAccessViaResourceDelegation(
+        IAltinnAuthorization altinnAuthorization,
+        string party,
+        string serviceResource)
+    {
+        altinnAuthorization.GetAuthorizedPartiesForLookup(
+                null!,
+                Arg.Any<List<string>>(),
+                Arg.Any<CancellationToken>())
+            .ReturnsForAnyArgs(new AuthorizedPartiesResult
+            {
+                AuthorizedParties =
+                [
+                    new AuthorizedParty
+                    {
+                        Party = party,
+                        PartyUuid = Guid.NewGuid(),
+                        PartyId = 0,
+                        Name = "Party",
+                        DateOfBirth = null,
+                        PartyType = AuthorizedPartyType.Person,
+                        IsDeleted = false,
+                        HasKeyRole = false,
+                        IsCurrentEndUser = false,
+                        IsMainAdministrator = false,
+                        IsAccessManager = false,
+                        HasOnlyAccessToSubParties = false,
+                        AuthorizedResources = [serviceResource],
+                        AuthorizedRolesAndAccessPackages = [],
+                        AuthorizedInstances = [],
+                        SubParties = null,
+                        ParentParty = null
+                    }
+                ]
+            });
+    }
+}

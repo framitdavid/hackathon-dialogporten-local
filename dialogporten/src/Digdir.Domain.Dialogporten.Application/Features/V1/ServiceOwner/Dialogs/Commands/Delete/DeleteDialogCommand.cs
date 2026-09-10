@@ -1,0 +1,98 @@
+﻿using System.Diagnostics;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Library.Entity.EntityFrameworkCore.Features.SoftDeletable;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Commands.Delete;
+
+public sealed class DeleteDialogCommand : IRequest<DeleteDialogResult>, ISilentUpdater, IFeatureMetricServiceResourceThroughDialogIdRequest
+{
+    public Guid Id { get; set; }
+    public Guid? IfMatchDialogRevision { get; set; }
+    public bool IsSilentUpdate { get; set; }
+
+    Guid IFeatureMetricServiceResourceThroughDialogIdRequest.DialogId => Id;
+}
+
+[GenerateOneOf]
+public sealed partial class DeleteDialogResult : OneOfBase<DeleteDialogSuccess, EntityNotFound, EntityDeleted, Forbidden, ConcurrencyError, Conflict>;
+
+public sealed record DeleteDialogSuccess(Guid Revision);
+
+internal sealed class DeleteDialogCommandHandler : IRequestHandler<DeleteDialogCommand, DeleteDialogResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IUserResourceRegistry _userResourceRegistry;
+
+    public DeleteDialogCommandHandler(
+        IDialogDbContext db,
+        IUnitOfWork unitOfWork,
+        IUserResourceRegistry userResourceRegistry)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(userResourceRegistry);
+
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _userResourceRegistry = userResourceRegistry;
+    }
+
+    public async Task<DeleteDialogResult> Handle(DeleteDialogCommand request, CancellationToken cancellationToken)
+    {
+        var resourceIds = await _userResourceRegistry.GetCurrentUserResourceIds(cancellationToken);
+
+        var dialog = await _db.Dialogs
+            .WhereIf(!_userResourceRegistry.IsCurrentUserServiceOwnerAdmin(), x => resourceIds.Contains(x.ServiceResource))
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(x => x.Id == request.Id, cancellationToken);
+
+        if (dialog is null)
+        {
+            return new EntityNotFound<DialogEntity>(request.Id);
+        }
+
+
+        if (dialog.Deleted)
+        {
+            // TODO: https://github.com/altinn/dialogporten/issues/1543
+            // When restoration is implemented, add a hint to the error message.
+            return new EntityDeleted<DialogEntity>(request.Id);
+        }
+
+        if (dialog.Frozen && !_userResourceRegistry.IsCurrentUserServiceOwnerAdmin())
+        {
+            return new Forbidden("User cannot modify frozen dialog");
+        }
+
+        if (!_userResourceRegistry.UserCanModifyResourceType(dialog.ServiceResourceType))
+        {
+            return new Forbidden($"User cannot modify resource type {dialog.ServiceResourceType}.");
+        }
+
+        if (request.IfMatchDialogRevision is { } revision && revision != dialog.Revision)
+        {
+            return new ConcurrencyError();
+        }
+
+        _db.Dialogs.SoftRemove(dialog);
+        var saveResult = await _unitOfWork
+            .EnableConcurrencyCheck(dialog, request.IfMatchDialogRevision)
+            .SaveChangesAsync(cancellationToken);
+
+        return saveResult.Match<DeleteDialogResult>(
+            success => new DeleteDialogSuccess(dialog.Revision),
+            domainError => throw new UnreachableException("Should never get a domain error when deleting a dialog"),
+            concurrencyError => concurrencyError,
+            conflict => conflict);
+    }
+}

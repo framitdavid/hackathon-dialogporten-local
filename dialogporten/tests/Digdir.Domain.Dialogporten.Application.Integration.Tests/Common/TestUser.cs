@@ -1,0 +1,198 @@
+using System.Security.Claims;
+using System.Text.Json;
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Externals.Presentation;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Common.ApplicationFlow;
+using Digdir.Domain.Dialogporten.Domain.Parties;
+
+namespace Digdir.Domain.Dialogporten.Application.Integration.Tests.Common;
+
+public sealed class TestUser : IUser
+{
+    private static readonly ClaimsPrincipal DefaultPrincipal = TestUsers.FromDefault();
+
+    private ClaimsPrincipal? _override;
+
+    public ClaimsPrincipal GetPrincipal() => _override ?? DefaultPrincipal;
+
+    public void OverrideUser(ClaimsPrincipal principal) => _override = principal;
+
+    public void Reset() => _override = null;
+}
+
+internal static class TestUsers
+{
+    public static string DefaultPid => "22834498646";
+    private static string DefaultEmail => "TEST@TEST.NO";
+    public static string DefaultParty => NorwegianPersonIdentifier.PrefixWithSeparator + DefaultPid;
+    public static string DefaultSystemUserId => "2e39badb-fc4e-4d25-ba77-5a9fe8afcae4";
+    public static string DefaultSystemUserOrg => "999888777";
+    public static string DefaultSystemUserUrn => "urn:altinn:systemuser:uuid:" + DefaultSystemUserId;
+
+    private const string DefaultConsumerClaim =
+        """
+        {
+            "authority": "iso6523-actorid-upis",
+            "ID": "0192:991825827"
+        }
+        """;
+
+    private static readonly Dictionary<string, string> Default = new()
+    {
+        [ClaimTypes.Name] = "Integration Test User",
+        [ClaimsPrincipalExtensions.IdportenAuthLevelClaim] = Constants.IdportenLoaHigh,
+        [ClaimsPrincipalExtensions.AltinnOrgClaim] = "ttd",
+        [ClaimsPrincipalExtensions.PidClaim] = DefaultPid,
+        [ClaimTypes.NameIdentifier] = "integration-test-user",
+        [ClaimsPrincipalExtensions.ConsumerClaim] = DefaultConsumerClaim
+    };
+
+    public static ClaimsPrincipalBuilder FromDefault() => ClaimsPrincipalBuilder.From(Default);
+
+    private static ClaimsPrincipalBuilder FromSelfIdentifiedUser() =>
+        ClaimsPrincipalBuilder.From(Default)
+            .RemoveClaim(ClaimsPrincipalExtensions.PidClaim)
+            .WithClaim(ClaimsPrincipalExtensions.IdportenAuthLevelClaim, Constants.IdportenLoaLow)
+            .WithClaim(ClaimTypes.Name, "SI and email test user");
+
+    extension<TFlowStep>(TFlowStep flowStep) where TFlowStep : IFlowStep
+    {
+        public TFlowStep AsIntegrationTestUser(Action<ClaimsPrincipalBuilder>? configure = null) =>
+            flowStep.AsUser(() => FromDefault()
+                .Configure(configure)
+                .Build());
+
+        public TFlowStep AsIntegrationEmailUser(Action<ClaimsPrincipalBuilder>? configure = null) =>
+            flowStep.AsUser(() => FromSelfIdentifiedUser()
+                .WithAmr(ClaimsPrincipalExtensions.AmrSelfRegisteredEmail)
+                .WithClaim(ClaimsPrincipalExtensions.IdportenEmailClaim, DefaultEmail)
+                .Configure(configure)
+                .Build());
+
+        public TFlowStep AsCorrespondenceUser(Action<ClaimsPrincipalBuilder>? configure = null) =>
+            flowStep.AsUser(() => FromDefault()
+                .WithScope(AuthorizationScope.CorrespondenceScope)
+                .Configure(configure)
+                .Build());
+
+        public TFlowStep AsAdminUser(Action<ClaimsPrincipalBuilder>? configure = null) =>
+            flowStep.AsUser(() => FromDefault()
+                .WithScope(AuthorizationScope.ServiceOwnerAdminScope)
+                .Configure(configure)
+                .Build());
+
+        public TFlowStep AsSystemUser(Action<ClaimsPrincipalBuilder>? configure = null) =>
+            flowStep.AsUser(() =>
+            {
+                var defaultClaims = new Dictionary<string, string>
+                {
+                    [ClaimsPrincipalExtensions.ConsumerClaim] = DefaultConsumerClaim
+                };
+                return ClaimsPrincipalBuilder.From(defaultClaims)
+                    .WithScope("digdir:dialogporten")
+                    .WithAuthorizationDetails([
+                        new()
+                        {
+                            Type = "urn:altinn:systemuser",
+                            SystemUserIds = [DefaultSystemUserId],
+                            SystemUserOrg = new ClaimsPrincipalExtensions.ConsumerOrganization
+                            {
+                                Authority = "iso6523-actorid-upis",
+                                Id = "0192:" + DefaultSystemUserOrg
+                            }
+                        }
+                    ])
+                    .Configure(configure)
+                    .Build();
+            });
+
+        public TFlowStep AsChangeTransmissionUser(Action<ClaimsPrincipalBuilder>? configure = null) =>
+            flowStep.AsUser(() => FromDefault()
+                .WithScope($"{AuthorizationScope.ServiceProvider} {AuthorizationScope.ServiceProviderChangeTransmissions}")
+                .Configure(configure)
+                .Build());
+
+        public TFlowStep AsUser(ClaimsPrincipal claimsPrincipal) =>
+            flowStep.Do(_ => DialogApplication.User.OverrideUser(claimsPrincipal));
+
+        public TFlowStep AsUser(Func<ClaimsPrincipal> claimsPrincipalBuilder) =>
+            flowStep.Do(_ => DialogApplication.User.OverrideUser(claimsPrincipalBuilder()));
+    }
+}
+
+internal sealed class ClaimsPrincipalBuilder
+{
+    private readonly Dictionary<string, string> _claims = [];
+
+    private ClaimsPrincipalBuilder() { }
+
+    public static ClaimsPrincipalBuilder From(Dictionary<string, string> claims)
+    {
+        var builder = new ClaimsPrincipalBuilder();
+        foreach (var claim in claims)
+        {
+            builder.WithClaim(claim.Key, claim.Value);
+        }
+
+        return builder;
+    }
+
+    public ClaimsPrincipalBuilder WithClaim(string type, string value)
+    {
+        if (type == ClaimsPrincipalExtensions.ScopeClaim)
+        {
+            return WithScope(value);
+        }
+
+        _claims[type] = value;
+        return this;
+    }
+
+    public ClaimsPrincipalBuilder RemoveClaim(string claim)
+    {
+        _claims.Remove(claim);
+        return this;
+    }
+
+    public ClaimsPrincipalBuilder WithAmr(string value)
+    {
+        _claims[ClaimsPrincipalExtensions.IdportenAmrClaim] = value;
+        return this;
+    }
+
+    public ClaimsPrincipalBuilder WithAuthorizationDetails(ClaimsPrincipalExtensions.SystemUserAuthorizationDetails[] value)
+    {
+        _claims[ClaimsPrincipalExtensions.AuthorizationDetailsClaim] = JsonSerializer.Serialize(value);
+        return this;
+    }
+
+    public ClaimsPrincipalBuilder WithScope(string value)
+    {
+        _claims[ClaimsPrincipalExtensions.ScopeClaim] = _claims.TryGetValue(ClaimsPrincipalExtensions.ScopeClaim, out var existing)
+            ? $"{existing} {value}"
+            : value;
+        return this;
+    }
+
+    public ClaimsPrincipalBuilder WithPid(string pid)
+    {
+        _claims[ClaimsPrincipalExtensions.PidClaim] = pid;
+        return this;
+    }
+
+    public ClaimsPrincipalBuilder Configure(Action<ClaimsPrincipalBuilder>? configure = null)
+    {
+        configure?.Invoke(this);
+        return this;
+    }
+
+    public ClaimsPrincipal Build() =>
+        new(new ClaimsIdentity(_claims
+            .Select(x => new Claim(x.Key, x.Value))));
+
+    public static implicit operator ClaimsPrincipal(ClaimsPrincipalBuilder builder)
+    {
+        return builder.Build();
+    }
+}

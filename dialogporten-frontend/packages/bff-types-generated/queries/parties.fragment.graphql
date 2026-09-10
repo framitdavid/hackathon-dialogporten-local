@@ -1,0 +1,25 @@
+fragment partyFields on AuthorizedParty {
+  party
+  hasOnlyAccessToSubParties
+  partyType
+  subParties {
+    ...subPartyFields
+  }
+  name
+  isCurrentEndUser
+  isDeleted
+  partyUuid
+  partyId
+  dateOfBirth
+}
+
+fragment subPartyFields on AuthorizedSubParty {
+  party
+  partyType
+  name
+  isCurrentEndUser
+  isDeleted
+  partyUuid
+  partyId
+  dateOfBirth
+}

@@ -1,0 +1,39 @@
+.fieldWrapper {
+  position: relative;
+}
+
+.phoneRow {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.countryCodeInput {
+  flex: 0 0 5rem;
+}
+
+.phoneNumberInput {
+  flex: 1;
+  min-width: 0;
+}
+
+.badgeOverlay {
+  position: absolute;
+  right: 0;
+  top: 0;
+  margin: 0.5em;
+}
+
+.linkButton {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.hiddenLabel {
+  display: none;
+}

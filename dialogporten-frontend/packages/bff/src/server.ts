@@ -1,0 +1,169 @@
+import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { logger } from '@altinn/dialogporten-node-logger';
+import compress from '@fastify/compress';
+import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
+import formBody from '@fastify/formbody';
+import type { FastifySessionOptions } from '@fastify/session';
+import session from '@fastify/session';
+import RedisStore from 'connect-redis';
+import Fastify, { type FastifyError } from 'fastify';
+import fastifyGraphiql from 'fastify-graphiql';
+import { oidc, userApi, verifyToken } from './auth/index.ts';
+import healthChecks from './azure/HealthChecks.ts';
+import healthProbes from './azure/HealthProbes.ts';
+import config from './config.ts';
+import { connectToDB } from './db.ts';
+import alertBannerApi from './features/alertBannerApi.ts';
+import featureApi from './features/featureApi.js';
+import graphqlApi from './graphql/api.ts';
+import { fastifyHeaders } from './graphql/fastifyHeaders.ts';
+import { startServiceResourcesRefresh, stopServiceResourcesRefresh } from './graphql/serviceResources/refresh.ts';
+import { otelSDK } from './instrumentation.ts';
+import redisClient from './redisClient.ts';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const errorTemplate = readFileSync(join(__dirname, 'templates', 'error.html'), 'utf-8');
+
+const { version, port, host, redisConnectionString, appConfigConnectionString } = config;
+
+const startServer = async (): Promise<void> => {
+  const { secret, enableGraphiql } = config;
+  const server = Fastify({
+    ignoreTrailingSlash: true,
+    ignoreDuplicateSlashes: true,
+    trustProxy: true,
+  });
+
+  const { dataSource } = await connectToDB();
+  /* CORS configuration for local env, needs to be applied before routes are defined */
+  const corsOptions = {
+    origin: ['https://app.localhost', 'http://localhost:3000'],
+    credentials: true,
+    methods: 'GET, POST, PATCH, DELETE, PUT',
+    allowedHeaders: 'Content-Type, Authorization, X-GraphQL-Operation, X-GraphQL-Start-Time',
+    exposedHeaders: 'X-GraphQL-Operation, X-GraphQL-Start-Time, X-Trace-Id',
+    preflightContinue: true,
+  };
+
+  server.register(cors, corsOptions);
+  server.register(compress, { global: false });
+  server.register(fastifyHeaders);
+  server.register(formBody);
+  server.register(cookie);
+
+  // Session setup
+  const cookieSessionConfig: FastifySessionOptions = {
+    secret,
+    rolling: true,
+    cookieName: 'arbeidsflate',
+    saveUninitialized: false,
+    cookie: {
+      secure: true,
+      httpOnly: true,
+    },
+  };
+
+  if (redisConnectionString) {
+    const store = new RedisStore({
+      client: redisClient,
+    });
+
+    logger.info('Setting up fastify-session with a Redis store');
+    server.register(session, { ...cookieSessionConfig, store });
+  } else {
+    logger.info('Setting up fastify-session');
+    server.register(session, cookieSessionConfig);
+  }
+
+  server.setErrorHandler<FastifyError>((error, request, reply) => {
+    logger.error(error, `Error handling request ${request.method} ${request.url}`);
+
+    //csp nonce for inline styles
+    const nonce = crypto.randomBytes(16).toString('base64');
+    const html = errorTemplate.replace('<style>', `<style nonce="${nonce}">`);
+
+    reply
+      .code(error.statusCode || 500)
+      .type('text/html')
+      .header(
+        'Content-Security-Policy',
+        `default-src 'self'; style-src 'self' 'nonce-${nonce}' https://altinncdn.no; font-src https://altinncdn.no; img-src 'self' data:; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'`,
+      )
+      .send(html);
+  });
+
+  server.register(verifyToken);
+  server.register(healthProbes, { version });
+  server.register(healthChecks, { version });
+  server.register(oidc);
+  server.register(userApi);
+  server.register(featureApi, {
+    appConfigConnectionString,
+  });
+  server.register(alertBannerApi, {
+    appConfigConnectionString,
+  });
+  server.register(graphqlApi);
+
+  if (enableGraphiql) {
+    server.register(fastifyGraphiql, {
+      url: '/api/graphiql',
+      graphqlURL: '/api/graphql',
+    });
+  }
+
+  server.listen({ port, host }, (error, address) => {
+    if (error) {
+      throw error;
+    }
+    logger.info(`Server ${version} is running on ${address}`);
+
+    startServiceResourcesRefresh();
+  });
+
+  // Graceful Shutdown
+  const gracefulShutdown = async () => {
+    try {
+      logger.info('Initiating graceful shutdown...');
+
+      // Stop accepting new connections
+      await server.close();
+      logger.info('Closed Fastify server.');
+
+      // Stop service resources background refresh
+      stopServiceResourcesRefresh();
+
+      // Disconnect Redis
+      await redisClient.quit();
+      logger.info('Disconnected Redis client.');
+
+      // Disconnect Database
+      if (dataSource?.isInitialized) {
+        await dataSource.destroy();
+        logger.info('Disconnected from PostgreSQL.');
+      }
+
+      // Shutdown OpenTelemetry SDK
+      if (otelSDK) {
+        await otelSDK.shutdown();
+        logger.info('OpenTelemetry SDK shut down successfully.');
+      }
+
+      process.exit(0);
+    } catch (err) {
+      logger.error(err, 'Error during graceful shutdown');
+      process.exit(1);
+    }
+  };
+
+  // Handle termination signals
+  process.on('SIGINT', gracefulShutdown);
+  process.on('SIGTERM', gracefulShutdown);
+};
+
+export default startServer;

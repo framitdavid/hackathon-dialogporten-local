@@ -1,0 +1,32 @@
+using Digdir.Domain.Dialogporten.Application.Common.Pagination;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.Search;
+using Digdir.Domain.Dialogporten.WebApi.Common;
+using Digdir.Domain.Dialogporten.WebApi.Common.Extensions;
+using Digdir.Domain.Dialogporten.WebApi.Common.Swagger;
+using FastEndpoints;
+using static Microsoft.AspNetCore.Http.StatusCodes;
+
+namespace Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.EndUser.Dialogs.Queries.Search;
+
+public sealed class SearchDialogEndpointSummary : Summary<SearchDialogEndpoint, SearchDialogQuery>
+{
+    public SearchDialogEndpointSummary()
+    {
+        Summary = "Gets a list of dialogs";
+        Description = """
+                      Performs a search for dialogs, returning a paginated list of dialogs. 
+
+                      * All date parameters must contain explicit time zone. Example: 2023-10-27T10:00:00Z or 2023-10-27T10:00:00+01:00
+                      * See "continuationToken" in the response for how to get the next page of results.
+                      * hasNextPage will be set to true if there are more items to get.
+                      """;
+
+        Responses[Status200OK] = Constants.SwaggerSummary.ReturnedResult.FormatInvariant("list");
+        Responses[Status401Unauthorized] = OpenApiExtrasAttribute.Get401Error<SearchDialogEndpoint>();
+        Responses[Status422UnprocessableEntity] = Constants.SwaggerSummary.DomainError;
+
+        RequestParam(p => p.ContinuationToken, "Supply \"continuationToken\" for the response to get the next page of results, if hasNextPage is true");
+        RequestParam(p => p.Limit, $"Limit the number of results per page ({PaginationConstants.MinLimit}-{PaginationConstants.MaxLimit}, default: {PaginationConstants.DefaultLimit})");
+        RequestParam(p => p.OrderBy, "Order the results by one or more fields. Defaults to \"contentUpdatedAt\" descending. For free text search, keeping the default \"contentUpdatedAt\" ordering together with \"contentUpdatedAfter\" gives the fastest results.");
+    }
+}

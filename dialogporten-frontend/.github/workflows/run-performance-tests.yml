@@ -1,0 +1,118 @@
+name: Run k6 performance tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Give a proper tag to the test'
+        required: true
+        default: 'Performance test'
+        type: string
+      browserVus:
+        description: 'Number of Browser VUS'
+        required: true
+        default: 1
+        type: number
+      bffVus:
+        description: 'Number of BFF VUS'
+        required: true
+        default: 1
+        type: number
+      randomizeUser:
+        description: 'Randomize user to use. If false, always run the test in the same order'
+        required: true
+        default: false
+        type: boolean
+      duration:
+        description: 'Duration of test, ie 30s, 1m, 10m'
+        required: true
+        default: 1m
+        type: string
+      breakpoint:
+        description: 'Gradually raise the load to number of VUs over the duration of the test. If VUs is high, it can break system breaks'
+        required: true
+        default: false
+        type: boolean 
+      abortOnFail:
+          description: 'Abort on fail. Only used for breakpoint tests'
+          required: true
+          default: false
+          type: boolean   
+      parallelism:
+        description: 'Number of parallel test runs'
+        required: true
+        default: 1
+        type: number 
+      environment:
+        description: "Environment to run the tests in"
+        required: true
+        default: 'at'
+        type: choice
+        options:
+          - at
+          - tt
+          - yt
+      onlyOpenAf:
+        description: 'Only open the AF do not perform clicking'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+run-name: ${{ inputs.tag }} ${{ inputs.browserVus }}/${{ inputs.bffVus }}/${{ inputs.duration }}/${{ inputs.parallelism }}
+jobs:
+  k6-performance-tests:
+    runs-on: self-hosted
+    environment: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: OIDC Login to Azure Public Cloud
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Populate kubeconfig with k6 context
+        id: populate_kubeconfig_with_k6_context
+        shell: bash
+        run: |
+          if ! az aks install-cli; then
+            echo "Failed to install kubectl CLI"
+            exit 1
+          fi
+
+          if ! az aks get-credentials --resource-group k6tests-rg --name k6tests-cluster; then
+            echo "Failed to populate kubeconfig"
+            exit 1
+          fi
+
+          if ! kubelogin convert-kubeconfig -l azurecli; then
+            echo "Failed to convert kubeconfig"
+            exit 1
+          fi
+      - name: Setup k6
+        uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+      - name: Run K6 tests (testAfBrowserAndBff)
+        run: |
+            k6configName="testAfBrowserAndBff"
+            k6configName="k6-${k6configName}"
+            ./packages/frontend/tests/performance/k6/run-test-in-k8s.sh \
+              -f "packages/frontend/tests/performance/k6/tests/testAfBrowserAndBff.js" \
+              -c "$k6configName" \
+              -n "$k6configName" \
+              -v "${{ inputs.browserVus }}" \
+              -w "${{ inputs.bffVus }}" \
+              -d "${{ inputs.duration }}" \
+              -p "${{ inputs.parallelism }}" \
+              -e "${{ inputs.environment }}" \
+              -r "${{ inputs.randomizeUser }}" \
+              -b "${{ inputs.breakpoint }}" \
+              -a "${{ inputs.abortOnFail }}" \
+              -o "${{ inputs.onlyOpenAf }}"
+
+ 

@@ -1,0 +1,245 @@
+# Runs dry-runs of the staging deployment for the release-please release PR, and
+# posts the release notes to Slack.
+#
+# Triggers on push to the release-please branch instead of pull_request on main:
+# the branch name is the only thing that identifies a release PR, and pull_request
+# triggers cannot filter on head branch, so a pull_request trigger would create a
+# skipped run for every ordinary PR. The branch is pushed with release-please's
+# PAT, so the push does trigger workflows.
+name: CI/CD Pull Request Release Please
+on:
+  push:
+    branches: ["release-please--branches--main"]
+
+# Supersede in-flight runs: release-please force-pushes this branch on every merge
+# to main, making the previous run's result irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  get-current-version:
+    name: Get current version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-get-current-version.yml
+
+  generate-git-short-sha:
+    name: Generate git short sha
+    permissions:
+      contents: read
+    uses: ./.github/workflows/workflow-generate-git-short-sha.yml
+
+  dry-run-deploy-infra-staging:
+    name: Deploy infra to staging (dry run)
+    needs: [generate-git-short-sha, get-current-version]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/workflow-deploy-infra.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_NAME: ${{ secrets.AZURE_SOURCE_KEY_VAULT_NAME }}
+      AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP: ${{ secrets.AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP }}
+      AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY }}
+    with:
+      environment: staging
+      region: norwayeast
+      dryRun: true
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  dry-run-deploy-apps-staging:
+    name: Deploy apps to staging (dry run)
+    needs: [generate-git-short-sha, get-current-version]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/workflow-deploy-apps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # todo: consider resolving these in another way since they are created in the infra-step
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+      AZURE_APP_INSIGHTS_CONNECTION_STRING: ${{ secrets.AZURE_APP_INSIGHTS_CONNECTION_STRING }}
+      AZURE_APP_CONFIGURATION_NAME: ${{ secrets.AZURE_APP_CONFIGURATION_NAME }}
+      AZURE_SERVICE_BUS_NAMESPACE_NAME: ${{ secrets.AZURE_SERVICE_BUS_NAMESPACE_NAME }}
+    with:
+      environment: staging
+      dryRun: true
+      version: ${{ needs.get-current-version.outputs.version }}-${{ needs.generate-git-short-sha.outputs.gitShortSha }}
+
+  send-slack-message:
+    name: Send Slack message
+    needs: [dry-run-deploy-infra-staging, dry-run-deploy-apps-staging]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Find release pull request
+        id: find-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Release-please pushes the branch before opening its PR, so the PR may
+          # not exist yet on the first push. Poll briefly; if it never appears,
+          # skip the Slack message - the next push to this branch re-runs this
+          # workflow and sends it then.
+          # The head filter is owner-qualified so a fork branch of the same name
+          # cannot match. gh pr list --head compares branch names only, which the
+          # REST head=<owner>:<ref> form avoids.
+          NUMBER=""
+          for _ in {1..6}; do
+            NUMBER=$(gh api --method GET \
+              "/repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&head=${GITHUB_REPOSITORY_OWNER}:${GITHUB_REF_NAME}&per_page=1" \
+              --jq '.[0].number // empty')
+            if [ -n "$NUMBER" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          if [ -z "$NUMBER" ]; then
+            echo "No open release PR found for $GITHUB_REF_NAME; skipping Slack message"
+            exit 0
+          fi
+
+          BODY=$(gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
+          DELIMITER="PR_BODY_$(openssl rand -hex 16)"
+          {
+            echo "number=$NUMBER"
+            echo "body<<$DELIMITER"
+            echo "$BODY"
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Calculate max pull request body length
+        id: calculate-max-length
+        if: steps.find-pr.outputs.number != ''
+        env:
+          PR_NUMBER: ${{ steps.find-pr.outputs.number }}
+        run: |
+          # Build the payload template using actual values where available
+          # Channel ID is typically around 11 characters (C1234567890)
+          ESTIMATED_CHANNEL_ID="C1234567890"
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}/pull/${PR_NUMBER}"
+
+          PAYLOAD_TEMPLATE=$(cat <<EOF
+          {
+            "channel": "${ESTIMATED_CHANNEL_ID}",
+            "blocks": [
+              {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "PLACEHOLDER_CONTENT"
+                  }
+                },
+                { "type": "divider" },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "Open release PR"
+                      },
+                      "url": "${REPO_URL}"
+                    }
+                  ]
+                }
+              ]
+          }
+          EOF
+          )
+
+          # Calculate template length (without the placeholder content)
+          PLACEHOLDER="PLACEHOLDER_CONTENT"
+          TEMPLATE_LENGTH=$((${#PAYLOAD_TEMPLATE} - ${#PLACEHOLDER}))
+
+          # Slack payload limit with safety margin
+          SLACK_PAYLOAD_LIMIT=3000
+          SAFETY_MARGIN=100
+
+          # Calculate maximum allowable length for PR content
+          MAX_BODY_LENGTH=$((SLACK_PAYLOAD_LIMIT - TEMPLATE_LENGTH - SAFETY_MARGIN))
+
+          echo "Template length: $TEMPLATE_LENGTH"
+          echo "Max content length: $MAX_BODY_LENGTH"
+          echo "MAX_BODY_LENGTH=$MAX_BODY_LENGTH" >> $GITHUB_ENV
+
+      - name: Slackify markdown in pull request body
+        id: slackify
+        if: steps.find-pr.outputs.number != ''
+        uses: LoveToKnow/slackify-markdown-action@698a1d4d0ff1794152a93c03ee8ca5e03a310d4e # v1.1.1
+        with:
+          text: ${{ env.PR_BODY }}
+        env:
+          PR_BODY: ${{ steps.find-pr.outputs.body }}
+
+      - name: Trim slackified content if necessary
+        id: trim-slackified
+        if: steps.find-pr.outputs.number != ''
+        env:
+          SLACKIFIED_CONTENT: ${{ steps.slackify.outputs.text }}
+          MAX_LENGTH: ${{ env.MAX_BODY_LENGTH }}
+        run: |
+          if [ ${#SLACKIFIED_CONTENT} -gt $MAX_LENGTH ]; then
+            # Account for the trimming message length to ensure we stay under limit
+            TRIM_MESSAGE="... (content trimmed due to length)"
+            AVAILABLE_LENGTH=$((MAX_LENGTH - ${#TRIM_MESSAGE}))
+            TRIMMED_CONTENT="${SLACKIFIED_CONTENT:0:$AVAILABLE_LENGTH}$TRIM_MESSAGE"
+            echo "FINAL_CONTENT<<EOF" >> $GITHUB_ENV
+            echo "$TRIMMED_CONTENT" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          else
+            echo "FINAL_CONTENT<<EOF" >> $GITHUB_ENV
+            echo "$SLACKIFIED_CONTENT" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
+
+      - name: Send GitHub slack message
+        id: slack
+        if: steps.find-pr.outputs.number != ''
+        uses: slackapi/slack-github-action@0d95c9a7becc1e6e297d76df9bc735c44f4cbcbc # v3.0.5
+        with:
+          errors: true
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ secrets.SLACK_CHANNEL_ID_FOR_RELEASES }}",
+              "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": ${{ toJson(env.FINAL_CONTENT) }}
+                    }
+                  },
+                  { "type": "divider" },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "text": {
+                          "type": "plain_text",
+                          "text": "Open release PR"
+                        },
+                        "url": "https://github.com/${{ github.repository }}/pull/${{ steps.find-pr.outputs.number }}"
+                      }
+                    ]
+                  }
+                ]
+            }

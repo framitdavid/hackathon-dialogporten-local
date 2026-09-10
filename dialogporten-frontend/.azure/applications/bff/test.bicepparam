@@ -1,0 +1,29 @@
+using './main.bicep'
+
+param environment = 'test'
+param location = 'norwayeast'
+param imageTag = readEnvironmentVariable('IMAGE_TAG')
+param hostName = 'https://af.at23.altinn.cloud'
+param dialogportenURL = 'https://platform.at23.altinn.cloud/dialogporten'
+param oicdUrl = 'test.idporten.no'
+param minReplicas = 2
+param maxReplicas = 3
+param workloadProfileName = 'Consumption'
+param logoutRedirectUri = 'https://at23.altinn.cloud/ui/Authentication/Logout'
+
+param platformBaseUrl = 'https://platform.at23.altinn.cloud'
+
+// secrets
+param environmentKeyVaultName = readEnvironmentVariable('ENVIRONMENT_KEY_VAULT_NAME')
+param containerAppEnvironmentName = readEnvironmentVariable('CONTAINER_APP_ENVIRONMENT_NAME')
+
+param additionalEnvironmentVariables = [
+  {
+    name: 'APPLICATIONINSIGHTS_ENABLED'
+    value: 'false'
+  }
+  {
+    name: 'OTEL_TRACES_SAMPLER_ARG'
+    value: '0.05'
+  }
+]

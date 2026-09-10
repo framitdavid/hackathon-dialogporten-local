@@ -1,0 +1,15 @@
+{
+  "name": "@digdir/dialogporten-schema",
+  "version": "1.0.11",
+  "description": "GraphQl schema and OpenAPI spec for Dialogporten",
+  "engines": {
+    "node": "24"
+  },
+  "author": "DigDir",
+  "main": "src/index.js",
+  "repository": {
+    "url": "git+https://github.com/Altinn/dialogporten.git"
+  },
+  "license": "ISC",
+  "type": "module"
+}

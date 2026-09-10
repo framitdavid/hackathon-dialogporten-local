@@ -1,0 +1,67 @@
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.SearchTransmissions;
+using Digdir.Domain.Dialogporten.WebApi.Common;
+using Digdir.Domain.Dialogporten.WebApi.Common.Authorization;
+using Digdir.Domain.Dialogporten.WebApi.Common.Extensions;
+using Digdir.Domain.Dialogporten.WebApi.Common.Swagger;
+using Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.Common.Extensions;
+using FastEndpoints;
+using MediatR;
+using Constants = Digdir.Domain.Dialogporten.WebApi.Common.Constants;
+
+namespace Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.EndUser.Dialogs.Queries.SearchTransmissions;
+
+[OpenApiOperationId("SearchDialogTransmissions")]
+[OpenApiExtras(
+    scopes: [AuthorizationScope.EndUser],
+    securitySchemes: [OpenApiSecurityScheme.IdportenSecurityScheme, OpenApiSecurityScheme.MaskinportenSecurityScheme])
+]
+public sealed class SearchDialogTransmissionEndpoint : Endpoint<SearchTransmissionRequest, List<TransmissionDto>>
+{
+    private readonly ISender _sender;
+
+    public SearchDialogTransmissionEndpoint(ISender sender)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        _sender = sender;
+    }
+
+    public override void Configure()
+    {
+        Get("dialogs/{dialogId}/transmissions");
+        Policies(AuthorizationPolicy.EndUser);
+        Group<EndUserGroup>();
+
+        Description(b => b.ProducesOneOf<List<TransmissionDto>>(
+            StatusCodes.Status200OK,
+            StatusCodes.Status410Gone,
+            StatusCodes.Status404NotFound));
+    }
+
+    public override async Task HandleAsync(SearchTransmissionRequest req, CancellationToken ct)
+    {
+        var query = new SearchTransmissionQuery
+        {
+            DialogId = req.DialogId,
+            AcceptedLanguages = req.AcceptedLanguages?.AcceptedLanguage
+        };
+
+        var result = await _sender.Send(query, ct);
+        await result.Match(
+            dto => Send.OkAsync(dto, ct),
+            notFound => this.NotFoundAsync(notFound, ct),
+            deleted => this.GoneAsync(deleted, ct),
+            forbidden => this.ForbiddenAsync(forbidden, ct));
+    }
+}
+
+[OpenApiTypeName("SearchDialogTransmissionsRequest")]
+public sealed class SearchTransmissionRequest
+{
+    public Guid DialogId { get; set; }
+
+    [FromHeader(Constants.AcceptLanguage, isRequired: false)]
+    public AcceptedLanguages? AcceptedLanguages { get; set; } = null;
+}

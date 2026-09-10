@@ -1,0 +1,91 @@
+using AutoMapper;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.BulkSetSystemLabels;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.SetSystemLabel;
+using Digdir.Domain.Dialogporten.GraphQL.Common;
+using Digdir.Domain.Dialogporten.GraphQL.Common.Authorization;
+using HotChocolate.Authorization;
+using MediatR;
+
+namespace Digdir.Domain.Dialogporten.GraphQL.EndUser.MutationTypes;
+
+[Authorize(Policy = AuthorizationPolicy.EndUser)]
+public sealed class Mutations
+{
+    public async Task<SetSystemLabelPayload> SetSystemLabel(
+        [Service] ISender mediator,
+        [Service] IMapper mapper,
+        [Service] IHttpContextAccessor httpContextAccessor,
+        SetSystemLabelInput input)
+    {
+        var command = mapper.Map<SetSystemLabelCommand>(input);
+        var result = await mediator.Send(command);
+
+        return result.Match(
+            success =>
+            {
+                httpContextAccessor.HttpContext?.Response.Headers
+                    .Append(Constants.ETag, success.Revision.ToString());
+
+                return new SetSystemLabelPayload { Success = true };
+            },
+            entityNotFound => new SetSystemLabelPayload
+            {
+                Errors = [new SetSystemLabelEntityNotFound { Message = entityNotFound.Message }]
+            },
+            forbidden => new SetSystemLabelPayload
+            {
+                Errors = [new SetSystemLabelForbidden { Message = string.Join(", ", forbidden.Reasons) }]
+            },
+            entityDeleted => new SetSystemLabelPayload
+            {
+                Errors = [new SetSystemLabelEntityDeleted { Message = entityDeleted.Message }]
+            },
+            validationError => new SetSystemLabelPayload
+            {
+                Errors = validationError.Errors.Select(x => new SetSystemLabelValidationError
+                {
+                    Message = x.ErrorMessage
+                }).Cast<ISetSystemLabelError>().ToList()
+            },
+            domainError => new SetSystemLabelPayload
+            {
+                Errors = domainError.Errors.Select(x => new SetSystemLabelDomainError { Message = x.ErrorMessage })
+                    .Cast<ISetSystemLabelError>().ToList()
+            },
+            concurrencyError => new SetSystemLabelPayload { Errors = [] },
+            conflict => new SetSystemLabelPayload { Errors = [new SetSystemLabelConflictError { Message = conflict.ErrorMessage }] }
+        );
+    }
+
+    public async Task<BulkSetSystemLabelPayload> BulkSetSystemLabels(
+        [Service] ISender mediator,
+        [Service] IMapper mapper,
+        BulkSetSystemLabelInput input)
+    {
+        var command = mapper.Map<BulkSetSystemLabelCommand>(input);
+        var result = await mediator.Send(command);
+
+        return result.Match(
+            _ => new BulkSetSystemLabelPayload { Success = true },
+            notFound => new BulkSetSystemLabelPayload
+            {
+                Errors = [new BulkSetSystemLabelNotFound { Message = notFound.Message }]
+            },
+            domainError => new BulkSetSystemLabelPayload
+            {
+                Errors = domainError.Errors
+                    .Select(x => new BulkSetSystemLabelDomainError { Message = x.ErrorMessage })
+                    .Cast<IBulkSetSystemLabelError>()
+                    .ToList()
+            },
+            validationError => new BulkSetSystemLabelPayload
+            {
+                Errors = validationError.Errors
+                    .Select(x => new BulkSetSystemLabelValidationError { Message = x.ErrorMessage })
+                    .Cast<IBulkSetSystemLabelError>()
+                    .ToList()
+            },
+            concurrencyError => new BulkSetSystemLabelPayload { Errors = [] },
+            conflict => new BulkSetSystemLabelPayload { Errors = [new BulkSetSystemLabelConflictError { Message = conflict.ErrorMessage }] });
+    }
+}

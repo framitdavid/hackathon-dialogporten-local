@@ -1,0 +1,206 @@
+name: "Check for file changes"
+
+on:
+  workflow_call:
+    inputs:
+      infra_base_sha:
+        description: "Base SHA for infrastructure changes"
+        required: false
+        default: ''
+        type: string
+      apps_base_sha:
+        description: "Base SHA for application changes"
+        required: false
+        default: ''
+        type: string
+      ref:
+        description: >-
+          Ref to evaluate changes at (the "head" of the comparison). Defaults to
+          the ref that triggered the caller. Set this when the caller acts on a
+          ref other than its own trigger ref - e.g. a release tag - so the gate
+          and the artifact being built are read from the same commit.
+        required: false
+        default: ''
+        type: string
+    outputs:
+      hasInfraChanges:
+        description: "Infrastructure related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasInfraChanges }}
+      hasBackendChanges:
+        description: "Backend related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasBackendChanges }}
+      hasWebApiClientChanges:
+        description: "Legacy WebApiClient related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasWebApiClientChanges }}
+      hasWebApiEndUserClientChanges:
+        description: "WebApi EndUser client related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasWebApiEndUserClientChanges }}
+      hasWebApiServiceOwnerClientChanges:
+        description: "WebApi ServiceOwner client related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasWebApiServiceOwnerClientChanges }}
+      hasTestChanges:
+        description: "Test related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasTestChanges }}
+      hasSwaggerSchemaChanges:
+        description: "Legacy swagger schema has changed"
+        value: ${{ jobs.check-for-changes.outputs.hasSwaggerSchemaChanges }}
+      hasOpenApiEndUserSchemaChanges:
+        description: "EndUser OpenAPI schema has changed"
+        value: ${{ jobs.check-for-changes.outputs.hasOpenApiEndUserSchemaChanges }}
+      hasOpenApiServiceOwnerSchemaChanges:
+        description: "ServiceOwner OpenAPI schema has changed"
+        value: ${{ jobs.check-for-changes.outputs.hasOpenApiServiceOwnerSchemaChanges }}
+      hasGqlSchemaChanges:
+        description: "GraphQL schema has changed"
+        value: ${{ jobs.check-for-changes.outputs.hasGqlSchemaChanges }}
+      hasMigrationChanges:
+        description: "Migration related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasMigrationChanges }}
+      hasSchemaPackageChanges:
+        description: "Schema package content or infrastructure has changed"
+        value: ${{ jobs.check-for-changes.outputs.hasSchemaPackageChanges }}
+      hasDependencyChanges:
+        description: "NuGet resolution inputs, SDK pinning, or a workflow governing the dependency scan changed"
+        value: ${{ jobs.check-for-changes.outputs.hasDependencyChanges }}
+      hasDockerChanges:
+        description: "Docker build context, NuGet resolution inputs, or a workflow governing the image build changed"
+        value: ${{ jobs.check-for-changes.outputs.hasDockerChanges }}
+
+jobs:
+  check-for-changes:
+    name: Filter
+    permissions:
+      contents: read
+    runs-on: self-hosted
+    outputs:
+      hasInfraChanges: ${{ steps.filter.outputs.azure_any_modified == 'true' || steps.filter.outputs.github_workflows_any_modified == 'true' }}
+      hasBackendChanges: ${{ steps.filter-backend.outputs.backend_any_modified == 'true' || steps.filter.outputs.github_workflows_any_modified == 'true' }}
+      hasTestChanges: ${{ steps.filter-backend.outputs.tests_any_modified == 'true' }}
+      hasSwaggerSchemaChanges: ${{ steps.filter-backend.outputs.swagger_schema_any_modified == 'true'}}
+      hasOpenApiEndUserSchemaChanges: ${{ steps.filter-backend.outputs.openapi_enduser_schema_any_modified == 'true'}}
+      hasOpenApiServiceOwnerSchemaChanges: ${{ steps.filter-backend.outputs.openapi_serviceowner_schema_any_modified == 'true'}}
+      hasGqlSchemaChanges: ${{ steps.filter-backend.outputs.gql_schema_any_modified == 'true'}}
+      hasMigrationChanges: ${{ steps.filter-backend.outputs.migration_any_modified == 'true'}}
+      hasWebApiClientChanges: ${{ steps.filter-backend.outputs.web_api_client_any_modified == 'true'}}
+      hasWebApiEndUserClientChanges: ${{ steps.filter-backend.outputs.web_api_enduser_client_any_modified == 'true'}}
+      hasWebApiServiceOwnerClientChanges: ${{ steps.filter-backend.outputs.web_api_serviceowner_client_any_modified == 'true'}}
+      hasSchemaPackageChanges: ${{ steps.filter-backend.outputs.schema_package_any_modified == 'true'}}
+      # Deliberately not OR'd with github_workflows_any_modified, unlike hasBackendChanges and
+      # hasInfraChanges: the dependencies and docker filters name the workflows that govern
+      # these jobs, so an unrelated workflow edit doesn't rebuild every image or rescan NuGet.
+      hasDependencyChanges: ${{ steps.filter-backend.outputs.dependencies_any_modified == 'true' }}
+      hasDockerChanges: ${{ steps.filter-backend.outputs.docker_any_modified == 'true' || steps.filter-backend.outputs.dependencies_any_modified == 'true' }}
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+
+      - uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
+        id: filter
+        with:
+          base_sha: ${{ inputs.infra_base_sha }}
+          files_yaml: |
+            azure:
+              - '.azure/infrastructure/**/*'
+              - '.azure/modules/**/*'
+            github_workflows:
+              - '.github/**/*'
+              - '!.github/ISSUE_TEMPLATE/**/*'
+              - '!.github/CODEOWNERS'
+              - '!.github/pull_request_template.md'
+
+      - name: Log infrastructure and workflow changes
+        run: |
+          echo "Infrastructure changes detected: ${{ steps.filter.outputs.azure_any_modified }}"
+          echo "Github workflows changes detected: ${{ steps.filter.outputs.github_workflows_any_modified }}"
+          echo "Changed infrastructure files:"
+          echo "${{ steps.filter.outputs.azure_modified_files }}"
+          echo "Changed github workflows files:"
+          echo "${{ steps.filter.outputs.github_workflows_modified_files }}"
+
+      - uses: step-security/changed-files@2e07db73e5ccdb319b9a6c7766bd46d39d304bad # v47.0.5
+        id: filter-backend
+        with:
+          base_sha: ${{ inputs.apps_base_sha }}
+          files_yaml: |
+            backend:
+              - 'src/**/*'
+              - '.azure/applications/**/*'
+              - '.azure/modules/containerApp/**/*'
+            tests:
+              - 'tests/**/*'
+            web_api_client:
+              - 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient/**/*'
+              - 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient.Common/**/*'
+            web_api_enduser_client:
+              - 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient.EndUser/**/*'
+              - 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient.Common/**/*'
+            web_api_serviceowner_client:
+              - 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient.ServiceOwner/**/*'
+              - 'src/WebApiClient/Digdir.Library.Dialogporten.WebApiClient.Common/**/*'
+            swagger_schema:
+              - 'docs/schema/V1/swagger.verified.json'
+            openapi_enduser_schema:
+              - 'docs/schema/V1/openapi.v1.enduser.verified.json'
+            openapi_serviceowner_schema:
+              - 'docs/schema/V1/openapi.v1.serviceowner.verified.json'
+            gql_schema:
+              - 'docs/schema/V1/schema.verified.graphql'
+            migration: 
+              - 'src/Digdir.Domain.Dialogporten.Infrastructure/Persistence/Migrations/**/*'
+            schema_package:
+              - 'docs/schema/V*/**/*'
+            # Anything that can change what NuGet resolves, and therefore what
+            # `dotnet list package --vulnerable` reports. MSBuild/NuGet config files are
+            # matched at any depth: nested Directory.Build.props files shadow the root one.
+            # The last two entries are the workflows that define and gate the scan, so a
+            # change to either still exercises it.
+            dependencies:
+              - '**/packages.lock.json'
+              - '**/*.csproj'
+              - '**/*.slnx'
+              - '**/Directory.Build.props'
+              - '**/Directory.Build.targets'
+              - '**/Directory.Packages.props'
+              - 'global.json'
+              - '**/nuget.config'
+              - '**/NuGet.config'
+              - '.github/workflows/ci-cd-pull-request.yml'
+              - '.github/workflows/workflow-check-for-changes.yml'
+            # Anything that can break an image build without also breaking `dotnet build`.
+            # The root .editorconfig is COPY'd into every image and, with
+            # EnforceCodeStyleInBuild + TreatWarningsAsErrors, can fail the in-container
+            # publish on a PR that skips build-and-test. The call site and this filter are
+            # already in the dependencies filter, which hasDockerChanges ORs in, so only the
+            # image-build pipeline itself is listed here.
+            docker:
+              - '**/Dockerfile'
+              - '**/*.dockerfile'
+              - '.dockerignore'
+              - '.editorconfig'
+              - '.github/workflows/workflow-publish-docker-images.yml'
+
+      - name: Log backend changes
+        run: |
+          echo "Backend changes detected: ${{ steps.filter-backend.outputs.backend_any_modified }}"
+          echo "Test changes detected: ${{ steps.filter-backend.outputs.tests_any_modified }}"
+          echo "Legacy Web API client changes detected: ${{ steps.filter-backend.outputs.web_api_client_any_modified }}"
+          echo "Web API EndUser client changes detected: ${{ steps.filter-backend.outputs.web_api_enduser_client_any_modified }}"
+          echo "Web API ServiceOwner client changes detected: ${{ steps.filter-backend.outputs.web_api_serviceowner_client_any_modified }}"
+          echo "Legacy swagger schema changes detected: ${{ steps.filter-backend.outputs.swagger_schema_any_modified }}"
+          echo "EndUser OpenAPI schema changes detected: ${{ steps.filter-backend.outputs.openapi_enduser_schema_any_modified }}"
+          echo "ServiceOwner OpenAPI schema changes detected: ${{ steps.filter-backend.outputs.openapi_serviceowner_schema_any_modified }}"
+          echo "GraphQL schema changes detected: ${{ steps.filter-backend.outputs.gql_schema_any_modified }}"
+          echo "Migration changes detected: ${{ steps.filter-backend.outputs.migration_any_modified }}"
+          echo "Schema package changes detected: ${{ steps.filter-backend.outputs.schema_package_any_modified }}"
+          echo "Dependency manifest changes detected: ${{ steps.filter-backend.outputs.dependencies_any_modified }}"
+          echo "Docker filter matched: ${{ steps.filter-backend.outputs.docker_any_modified }}"
+          echo "Docker image build triggered (docker || dependencies): ${{ steps.filter-backend.outputs.docker_any_modified == 'true' || steps.filter-backend.outputs.dependencies_any_modified == 'true' }}"
+          echo "Changed backend files:"
+          echo "${{ steps.filter-backend.outputs.backend_modified_files }}"

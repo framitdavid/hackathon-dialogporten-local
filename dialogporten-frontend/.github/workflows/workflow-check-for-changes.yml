@@ -1,0 +1,97 @@
+name: "Check for file changes"
+
+on:
+  workflow_call:
+    inputs:
+      infra_base_sha:
+        description: "Base SHA for infrastructure changes"
+        required: false
+        default: ""
+        type: string
+      apps_base_sha:
+        description: "Base SHA for application changes"
+        required: false
+        default: ""
+        type: string
+    outputs:
+      hasInfrastructureChanges:
+        description: "Infrastructure related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasInfrastructureChanges }}
+      hasApplicationChanges:
+        description: "Application related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasApplicationChanges }}
+      hasMigrationChanges:
+        description: "Migration related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasMigrationChanges }}
+      hasNodeLoggerChanges:
+        description: "Node Logger related files changed"
+        value: ${{ jobs.check-for-changes.outputs.hasNodeLoggerChanges }}
+
+jobs:
+  check-for-changes:
+    name: Filter
+    runs-on: self-hosted
+    outputs:
+      hasInfrastructureChanges: ${{ steps.filter-infra.outputs.infrastructure_any_modified == 'true' || steps.filter-infra.outputs.github_workflows_any_modified == 'true' }}
+      hasApplicationChanges: ${{ steps.filter-apps.outputs.applications_any_modified == 'true' || steps.filter-infra.outputs.github_workflows_any_modified == 'true' }}
+      hasMigrationChanges: ${{ steps.filter-apps.outputs.migrations_any_modified == 'true' }}
+      hasNodeLoggerChanges: ${{ steps.filter-apps.outputs.nodeLogger_any_modified == 'true' || steps.filter-infra.outputs.github_workflows_any_modified == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # fetch-depth needs to be 0 in cases where we want to fetch changes since previous tag for example
+          fetch-depth: 0
+
+      - uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46.0.5
+        id: filter-infra
+        with:
+          base_sha: ${{ inputs.infra_base_sha }}
+          files_yaml: |
+            infrastructure:
+              - '.azure/infrastructure/*'
+              - '.azure/modules/**/*'
+            github_workflows:
+              - '.github/**/*'
+              - '!.github/ISSUE_TEMPLATE/**/*'
+              - '!.github/CODEOWNERS'
+              - '!.github/pull_request_template.md'
+      - name: Log infrastructure changes
+        run: |
+          echo "Infrastructure changes detected: ${{ steps.filter-infra.outputs.infrastructure_any_modified }}"
+          echo "Github workflows changes detected: ${{ steps.filter-infra.outputs.github_workflows_any_modified }}"
+          echo "Changed infrastructure files:"
+          echo "${{ steps.filter-infra.outputs.infrastructure_modified_files }}"
+          echo "Changed github workflows files:"
+          echo "${{ steps.filter-infra.outputs.github_workflows_modified_files }}"
+
+      - uses: tj-actions/changed-files@ed68ef82c095e0d48ec87eccea555d944a631a4c # v46.0.5
+        id: filter-apps
+        with:
+          base_sha: ${{ inputs.apps_base_sha }}
+          files_yaml: |
+            applications:
+              - '.azure/applications/**/*'
+              - '.azure/modules/**/*'
+              - 'packages/bff/**/*'
+              - 'packages/frontend/**/*'
+              - 'packages/embeddable-markdown-html/**/*'
+              - 'packages/fastify-graphiql/**/*'
+            migrations:
+              - 'packages/bff/src/migrations/**/*'
+              - '.azure/applications/bff-migration-job/**/*'
+              - '.azure/modules/containerAppJob/**/*'
+            nodeLogger:
+              - 'packages/node-logger/**/*'
+
+      - name: Log application changes
+        run: |
+          echo "Application changes detected: ${{ steps.filter-apps.outputs.applications_any_modified }}"
+          echo "Migration changes detected: ${{ steps.filter-apps.outputs.migrations_any_modified }}"
+          echo "Node Logger changes detected: ${{ steps.filter-apps.outputs.nodeLogger_any_modified }}"
+          echo "Changed application files:"
+          echo "${{ steps.filter-apps.outputs.applications_modified_files }}"
+          echo "Changed migration files:"
+          echo "${{ steps.filter-apps.outputs.migrations_modified_files }}"
+          echo "Changed node logger files:"
+          echo "${{ steps.filter-apps.outputs.nodeLogger_modified_files }}"

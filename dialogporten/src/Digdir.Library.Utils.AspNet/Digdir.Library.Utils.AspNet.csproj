@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>1591</NoWarn> <!-- Disable warnings for missing XML comments -->
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Microsoft.AspNetCore.ResponseCompression (used by ResponseCompressionExtensions) ships
+             only through the ASP.NET Core shared framework; there is no standalone NuGet for it. -->
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Azure.Identity" Version="1.21.0" />
+        <PackageReference Include="HotChocolate.Diagnostics" Version="16.6.2" />
+        <PackageReference Include="Microsoft.ApplicationInsights.AspNetCore" Version="3.1.2" />
+        <PackageReference Include="AspNetCore.HealthChecks.UI.Client" Version="9.0.0"/>
+        <PackageReference Include="Microsoft.Azure.AppConfiguration.AspNetCore" Version="8.6.0" />
+        <PackageReference Include="Azure.Monitor.OpenTelemetry.AspNetCore" Version="1.6.0" />
+        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
+        <PackageReference Include="OpenTelemetry" Version="1.17.0" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.17.0" />
+        <PackageReference Include="Npgsql.OpenTelemetry" Version="10.0.3" />
+        <PackageReference Include="ZiggyCreatures.FusionCache.OpenTelemetry" Version="2.6.0"/>
+        <PackageReference Include="Serilog.Sinks.OpenTelemetry" Version="4.2.0"/>
+        <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+        <PackageReference Include="Serilog.Enrichers.Environment" Version="3.0.1"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Digdir.Domain.Dialogporten.Infrastructure\Digdir.Domain.Dialogporten.Infrastructure.csproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Digdir.Domain.Dialogporten.WebApi.Unit.Tests" />
+    </ItemGroup>
+
+</Project>

@@ -1,0 +1,68 @@
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.Dialogs.Queries.GetActivity;
+using Digdir.Domain.Dialogporten.WebApi.Common;
+using Digdir.Domain.Dialogporten.WebApi.Common.Authorization;
+using Digdir.Domain.Dialogporten.WebApi.Common.Extensions;
+using Digdir.Domain.Dialogporten.WebApi.Common.Swagger;
+using Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.Common.Extensions;
+using FastEndpoints;
+using MediatR;
+using Constants = Digdir.Domain.Dialogporten.WebApi.Common.Constants;
+
+namespace Digdir.Domain.Dialogporten.WebApi.Endpoints.V1.EndUser.Dialogs.Queries.GetActivity;
+
+[OpenApiOperationId("GetDialogActivity")]
+[OpenApiExtras(
+    scopes: [AuthorizationScope.EndUser],
+    securitySchemes: [OpenApiSecurityScheme.IdportenSecurityScheme, OpenApiSecurityScheme.MaskinportenSecurityScheme])
+]
+public sealed class GetDialogActivityEndpoint : Endpoint<GetActivityRequest, ActivityDto>
+{
+    private readonly ISender _sender;
+
+    public GetDialogActivityEndpoint(ISender sender)
+    {
+        ArgumentNullException.ThrowIfNull(sender);
+
+        _sender = sender;
+    }
+
+    public override void Configure()
+    {
+        Get("dialogs/{dialogId}/activities/{activityId}");
+        Policies(AuthorizationPolicy.EndUser);
+        Group<EndUserGroup>();
+
+        Description(b => b.ProducesOneOf<ActivityDto>(
+            StatusCodes.Status200OK,
+            StatusCodes.Status404NotFound));
+    }
+
+    public override async Task HandleAsync(GetActivityRequest req, CancellationToken ct)
+    {
+        var query = new GetActivityQuery
+        {
+            DialogId = req.DialogId,
+            ActivityId = req.ActivityId,
+            AcceptedLanguages = req.AcceptedLanguages?.AcceptedLanguage,
+        };
+        var result = await _sender.Send(query, ct);
+        await result.Match(
+            dto => Send.OkAsync(dto, ct),
+            notFound => this.NotFoundAsync(notFound, ct),
+            deleted => this.GoneAsync(deleted, ct),
+            forbidden => this.ForbiddenAsync(forbidden, ct));
+    }
+}
+
+[OpenApiTypeName("GetDialogActivityRequest")]
+public sealed class GetActivityRequest
+{
+    public Guid DialogId { get; set; }
+
+    public Guid ActivityId { get; set; }
+
+    [FromHeader(Constants.AcceptLanguage, isRequired: false)]
+    public AcceptedLanguages? AcceptedLanguages { get; set; } = null;
+}

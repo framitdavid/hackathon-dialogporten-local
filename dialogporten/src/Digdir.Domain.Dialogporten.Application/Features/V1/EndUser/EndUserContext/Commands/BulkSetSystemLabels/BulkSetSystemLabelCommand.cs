@@ -1,0 +1,155 @@
+using System.Data;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions.Enumerables;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Actors;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using OneOf;
+
+namespace Digdir.Domain.Dialogporten.Application.Features.V1.EndUser.EndUserContext.Commands.BulkSetSystemLabels;
+
+public sealed class BulkSetSystemLabelCommand : IRequest<BulkSetSystemLabelResult>, IFeatureMetricServiceResourceIgnoreRequest
+{
+    public BulkSetSystemLabelDto Dto { get; set; } = new();
+}
+
+public sealed record BulkSetSystemLabelSuccess;
+
+[GenerateOneOf]
+public sealed partial class BulkSetSystemLabelResult : OneOfBase<BulkSetSystemLabelSuccess, EntityNotFound, DomainError, ValidationError, ConcurrencyError, Conflict>;
+
+internal sealed class BulkSetSystemLabelCommandHandler : IRequestHandler<BulkSetSystemLabelCommand, BulkSetSystemLabelResult>
+{
+    private readonly IDialogDbContext _db;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IUserRegistry _userRegistry;
+    private readonly IAltinnAuthorization _altinnAuthorization;
+
+    public BulkSetSystemLabelCommandHandler(
+        IDialogDbContext db,
+        IUnitOfWork unitOfWork,
+        IUserRegistry userRegistry,
+        IAltinnAuthorization altinnAuthorization)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
+        ArgumentNullException.ThrowIfNull(userRegistry);
+        ArgumentNullException.ThrowIfNull(altinnAuthorization);
+
+        _db = db;
+        _unitOfWork = unitOfWork;
+        _userRegistry = userRegistry;
+        _altinnAuthorization = altinnAuthorization;
+    }
+
+    public async Task<BulkSetSystemLabelResult> Handle(BulkSetSystemLabelCommand request, CancellationToken cancellationToken)
+    {
+        var dialogIds = request.Dto.Dialogs
+            .Select(d => d.DialogId)
+            .ToList();
+
+        var (distinctParties, distinctServiceResources) =
+            await GetDistinctPartiesAndServiceResources(dialogIds, cancellationToken);
+
+        var authorizedResources = await _altinnAuthorization.GetAuthorizedResourcesForSearch(
+            distinctParties, distinctServiceResources, cancellationToken: cancellationToken);
+
+        await _unitOfWork.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        var dialogs = await _db.Dialogs
+            .PrefilterAuthorizedDialogs(authorizedResources)
+            .Include(x => x.EndUserContext)
+                .ThenInclude(x => x.DialogEndUserContextSystemLabels)
+            .Where(x => dialogIds.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+
+        var notFound = request.Dto.Dialogs
+            .Select(x => x.DialogId)
+            .Except(dialogs.Select(d => d.Id))
+            .ToList();
+
+        if (notFound.Count > 0)
+        {
+            return new EntityNotFound<DialogEntity>(notFound);
+        }
+
+        if (RevisionsHasMismatch(request, dialogs))
+        {
+            return new ConcurrencyError();
+        }
+
+        await dialogs.MergeAsync(
+            sources: request.Dto.Dialogs,
+            destinationKeySelector: x => x.Id,
+            sourceKeySelector: x => x.DialogId,
+            update: (sets, ct) => UpdateDialogs(sets,
+                request.Dto.AddLabels,
+                request.Dto.RemoveLabels, ct),
+            cancellationToken: cancellationToken);
+
+        var saveResult = await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return saveResult.Match<BulkSetSystemLabelResult>(
+            _ => new BulkSetSystemLabelSuccess(),
+            domainError => domainError,
+            concurrencyError => concurrencyError,
+            conflict => conflict);
+    }
+
+    private static bool RevisionsHasMismatch(BulkSetSystemLabelCommand request, List<DialogEntity> dialogs)
+    {
+        var dialogsById = dialogs.ToDictionary(x => x.Id);
+        foreach (var dto in request.Dto.Dialogs)
+        {
+            if (dto.EndUserContextRevision is { } expected &&
+                dialogsById[dto.DialogId].EndUserContext.Revision != expected)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<(List<string>, List<string>)> GetDistinctPartiesAndServiceResources(
+        List<Guid> dialogIds,
+        CancellationToken cancellationToken)
+    {
+        var relevantServiceResources = await _db.Dialogs
+            .Where(x => dialogIds.Contains(x.Id))
+            .Select(x => new { x.ServiceResource, x.Party })
+            .ToListAsync(cancellationToken);
+
+        var distinctParties = relevantServiceResources
+            .Select(x => x.Party)
+            .Distinct()
+            .ToList();
+
+        var distinctServiceResources = relevantServiceResources
+            .Select(x => x.ServiceResource)
+            .Distinct()
+            .ToList();
+
+        return (distinctParties, distinctServiceResources);
+    }
+
+    private async Task UpdateDialogs(
+        IEnumerable<UpdateSet<DialogEntity, DialogRevisionDto>> updateSets,
+        IEnumerable<SystemLabel.Values> addLabels,
+        IEnumerable<SystemLabel.Values> removeLabels,
+        CancellationToken cancellationToken)
+    {
+        var userInfo = await _userRegistry.GetCurrentUserInformation(cancellationToken);
+        var performedBy = LabelAssignmentLogActorFactory.FromUserInformation(userInfo);
+        foreach (var (dto, entity) in updateSets)
+        {
+            entity.EndUserContext.UpdateSystemLabels(addLabels, removeLabels, performedBy);
+            _unitOfWork.EnableConcurrencyCheck(entity.EndUserContext, dto.EndUserContextRevision);
+        }
+    }
+}

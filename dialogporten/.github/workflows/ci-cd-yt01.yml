@@ -1,0 +1,250 @@
+﻿# Deploys a release to yt01. Triggered manually or from the scale-on workflow.
+name: CI/CD YT01
+run-name: CI/CD YT01 ${{ inputs.version && format('({0})', inputs.version) || '(latest)' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to deploy (e.g. 1.23.4). Leave empty to auto-detect latest release."
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  resolve-version:
+    name: Resolve deploy version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_VERSION" ]]; then
+            echo "Using provided version: $INPUT_VERSION"
+            echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q '.tagName' | sed 's/^v//')
+            echo "Auto-detected latest release: $VERSION"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+  get-versions-from-github:
+    name: Get Latest Deployed Version Info from GitHub
+    uses: ./.github/workflows/workflow-get-latest-deployed-version-info-from-github.yml
+    with:
+      environment: yt01
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+
+  check-for-changes:
+    name: Check for changes
+    needs: [get-versions-from-github]
+    uses: ./.github/workflows/workflow-check-for-changes.yml
+    with:
+      infra_base_sha: ${{ needs.get-versions-from-github.outputs.infra_version_sha }}
+      apps_base_sha: ${{ needs.get-versions-from-github.outputs.apps_version_sha }}
+
+  deploy-infra:
+    name: Deploy infra to yt01
+    if: ${{ needs.check-for-changes.outputs.hasInfraChanges == 'true' }}
+    needs: [check-for-changes, resolve-version]
+    uses: ./.github/workflows/workflow-deploy-infra.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_NAME: ${{ secrets.AZURE_SOURCE_KEY_VAULT_NAME }}
+      AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SUBSCRIPTION_ID }}
+      AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP: ${{ secrets.AZURE_SOURCE_KEY_VAULT_RESOURCE_GROUP }}
+      AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY: ${{ secrets.AZURE_SOURCE_KEY_VAULT_SSH_JUMPER_SSH_PUBLIC_KEY }}
+    with:
+      environment: yt01
+      region: norwayeast
+      version: ${{ needs.resolve-version.outputs.version }}
+      ref: "refs/tags/v${{ needs.resolve-version.outputs.version }}"
+
+  store-infra-version:
+    name: Store Latest Deployed Infra Version as GitHub Variable
+    needs: [deploy-infra, resolve-version]
+    if: ${{ needs.deploy-infra.result == 'success' }}
+    uses: ./.github/workflows/workflow-store-github-env-variable.yml
+    with:
+      variable_name: LATEST_DEPLOYED_INFRA_VERSION
+      variable_value: ${{ needs.resolve-version.outputs.version }}
+      environment: yt01
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+
+  deploy-apps:
+    name: Deploy apps to yt01
+    needs: [check-for-changes, deploy-infra, resolve-version]
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasBackendChanges == 'true' }}
+    uses: ./.github/workflows/workflow-deploy-apps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # todo: consider resolving these in another way since they are created in the infra-step
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+      AZURE_APP_INSIGHTS_CONNECTION_STRING: ${{ secrets.AZURE_APP_INSIGHTS_CONNECTION_STRING }}
+      AZURE_APP_CONFIGURATION_NAME: ${{ secrets.AZURE_APP_CONFIGURATION_NAME }}
+      AZURE_SERVICE_BUS_NAMESPACE_NAME: ${{ secrets.AZURE_SERVICE_BUS_NAMESPACE_NAME }}
+    with:
+      environment: yt01
+      version: ${{ needs.resolve-version.outputs.version }}
+      runMigration: false # DB may be off due to scale-to-zero, run migrations manually
+      ref: "refs/tags/v${{ needs.resolve-version.outputs.version }}"
+
+  update-manifests:
+    name: Update manifest image tags for yt01
+    needs: [check-for-changes, deploy-infra, resolve-version]
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasBackendChanges == 'true' }}
+    uses: ./.github/workflows/workflow-dispatch-update-manifests.yml
+    with:
+      environment: yt01
+      image_tag: ${{ needs.resolve-version.outputs.version }}
+    secrets:
+      MANIFESTS_PAT: ${{ secrets.MANIFESTS_PAT }}
+
+  tag-issues-with-environment:
+    name: Tag deployed PRs and issues for yt01
+    needs: [ deploy-apps, deploy-infra, resolve-version ]
+    if: ${{ always() && !failure() && !cancelled() && (needs.deploy-apps.outputs.deployment_executed == 'true' || needs.deploy-infra.outputs.deployment_executed == 'true') }}
+    uses: ./.github/workflows/workflow-tag-issues-with-environment.yml
+    with:
+      environment-label: yt01
+      version: ${{ needs.resolve-version.outputs.version }}
+
+  store-apps-version:
+    name: Store Latest Deployed Apps Version as GitHub Variable
+    needs: [deploy-apps, resolve-version]
+    if: ${{ always() && !failure() && needs.deploy-apps.outputs.deployment_executed == 'true' }}
+    uses: ./.github/workflows/workflow-store-github-env-variable.yml
+    with:
+      variable_name: LATEST_DEPLOYED_APPS_VERSION
+      variable_value: ${{ needs.resolve-version.outputs.version }}
+      environment: yt01
+    secrets:
+      GH_TOKEN: ${{ secrets.RELEASE_VERSION_STORAGE_PAT }}
+
+  run-e2e-tests:
+    name: "Run K6 functional end-to-end tests"
+    # we want the end-to-end tests to be dependent on deployment of infrastructure and apps, but if infrastructure is skipped, we still want to run the tests
+    if: ${{ always() && !failure() && !cancelled() && needs.check-for-changes.outputs.hasBackendChanges == 'true' }}
+    needs: [deploy-apps, check-for-changes, resolve-version]
+    uses: ./.github/workflows/workflow-run-k6-tests.yml
+    secrets:
+      TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+      TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+    with:
+      environment: yt01
+      apiVersion: v1
+      testSuitePath: tests/k6/suites/all-single-pass.js
+      ref: "refs/tags/v${{ needs.resolve-version.outputs.version }}"
+    permissions:
+      checks: write
+      pull-requests: write
+
+  run-graphql-e2e-tests:
+    name: "Run GraphQL E2E tests"
+    if: ${{ always() && !failure() && !cancelled() && (needs.check-for-changes.outputs.hasBackendChanges == 'true' || needs.check-for-changes.outputs.hasTestChanges == 'true') }}
+    needs: [ run-e2e-tests, check-for-changes, resolve-version ]
+    uses: ./.github/workflows/workflow-run-graphql-e2e-tests.yml
+    secrets:
+      TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+      TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+    with:
+      environment: yt01
+      ref: "refs/tags/v${{ needs.resolve-version.outputs.version }}"
+
+  run-webapi-e2e-tests:
+    name: "Run WebAPI E2E tests"
+    if: ${{ always() && !failure() && !cancelled() && (needs.check-for-changes.outputs.hasBackendChanges == 'true' || needs.check-for-changes.outputs.hasTestChanges == 'true') }}
+    needs: [ run-e2e-tests, check-for-changes, resolve-version ]
+    uses: ./.github/workflows/workflow-run-webapi-e2e-tests.yml
+    secrets:
+      TOKEN_GENERATOR_USERNAME: ${{ secrets.TOKEN_GENERATOR_USERNAME }}
+      TOKEN_GENERATOR_PASSWORD: ${{ secrets.TOKEN_GENERATOR_PASSWORD }}
+    with:
+      environment: yt01
+      ref: "refs/tags/v${{ needs.resolve-version.outputs.version }}"
+
+  run-performance-tests:
+    name: "Run K6 performance tests"
+    if: ${{ always() && !failure() && !cancelled() }}
+    needs: [run-e2e-tests, resolve-version]
+    uses: ./.github/workflows/workflow-run-k6-performance.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+    strategy:
+      max-parallel: 4
+      matrix:
+        files:
+          - tests/k6/tests/serviceowner/performance/serviceOwnerSearchWithThresholds.js
+          - tests/k6/tests/serviceowner/performance/createDialogWithThresholds.js
+          - tests/k6/tests/serviceowner/performance/createTransmissionsWithThresholds.js
+          - tests/k6/tests/enduser/performance/enduserSearchWithThresholds.js
+          - tests/k6/tests/graphql/performance/graphqlSearchWithThresholds.js
+      fail-fast: false
+    with:
+      environment: yt01
+      apiVersion: v1
+      vus: 1
+      duration: 60s
+      testSuitePath: ${{ matrix.files }}
+      parallelism: 1
+      breakpoint: false
+      abortOnFail: false
+      numberOfEndUsers: 200
+      ref: "refs/tags/v${{ needs.resolve-version.outputs.version }}"
+    permissions:
+      checks: write
+      pull-requests: write
+      id-token: write
+      contents: read
+
+  send-slack-message-on-failure:
+    name: Send Slack message on failure
+    needs: [deploy-infra, deploy-apps, tag-issues-with-environment, run-e2e-tests, run-graphql-e2e-tests, run-webapi-e2e-tests, run-performance-tests]
+    if: ${{ always() && failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-send-ci-cd-status-slack-message.yml
+    with:
+      environment: yt01
+      infra_status: ${{ needs.deploy-infra.result }}
+      apps_status: ${{ needs.deploy-apps.result }}
+      e2e_tests_status: ${{ needs.run-e2e-tests.result }}
+      graphql_e2e_tests_status: ${{ needs.run-graphql-e2e-tests.result }}
+      webapi_e2e_tests_status: ${{ needs.run-webapi-e2e-tests.result }}
+      performance_tests_status: ${{ needs.run-performance-tests.result }}
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID_FOR_CI_CD_STATUS }}
+
+  send-deployment-to-swarmia:
+    name: Send deployment to Swarmia
+    if: ${{ always() && !failure() && !cancelled() }}
+    uses: ./.github/workflows/workflow-swarmia-deployment.yml
+    needs: [ deploy-infra, deploy-apps, resolve-version ]
+    with:
+      app-name: dialogporten
+      environment: 'yt01'
+      version: ${{ needs.resolve-version.outputs.version }}
+    secrets:
+      token: ${{ secrets.SWARMIA_DEPLOYMENTS_AUTHORIZATION }}

@@ -1,0 +1,102 @@
+name: Run K6 performance tests
+
+on:
+  workflow_call:
+    inputs:
+      apiVersion:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      testSuitePath:
+        required: true
+        type: string
+      vus:
+        required: true
+        type: number
+      duration:
+        required: true
+        type: string
+      parallelism:
+        required: true
+        type: number
+      breakpoint:
+        required: true
+        type: boolean
+      abortOnFail:
+        required: true
+        type: boolean
+      numberOfEndUsers:
+        required: true
+        type: number
+      ref:
+        description: "The branch or tag ref to run the tests on. Using default checkout ref if not provided."
+        required: false
+        default: ${{ github.ref }}
+        type: string
+    secrets:
+      AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  k6-test:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+    - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+      with:
+        egress-policy: audit
+
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.ref }}
+
+    - name: Azure Login
+      uses: ./.github/actions/azure-login
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        allow-no-subscriptions: true
+
+    - name: Populate kubeconfig with k6 context
+      id: populate_kubeconfig_with_k6_context
+      shell: bash
+      run: |
+        if ! az aks install-cli; then
+          echo "Failed to install kubectl CLI"
+          exit 1
+        fi
+
+        if ! az aks get-credentials --resource-group k6tests-rg --name k6tests-cluster; then
+          echo "Failed to populate kubeconfig"
+          exit 1
+        fi
+
+        if ! kubelogin convert-kubeconfig -l azurecli; then
+          echo "Failed to convert kubeconfig"
+          exit 1
+        fi
+    - name: Setup k6
+      uses: grafana/setup-k6-action@db07bd9765aac508ef18982e52ab937fe633a065 # v1.2.1
+    - name: Run K6 tests (${{ inputs.testSuitePath }})
+      run: |
+        echo "Running k6 test suite ${TEST_SUITE_PATH} with ${VUS} VUs for ${DURATION} on ${PARALLELISM} parallelism"
+        k6configName=$(basename "${TEST_SUITE_PATH}" .js)
+        k6configName="k6-${k6configName}"
+        ./tests/k6/tests/scripts/run-test-in-k8s.sh -f "${TEST_SUITE_PATH}" -c "$k6configName" -n "$k6configName" -v "${VUS}" -d "${DURATION}" -p "${PARALLELISM}" -a "${ABORT_ON_FAIL}" -b "${BREAKPOINT}"
+      env:
+        API_ENVIRONMENT: ${{ inputs.environment }}
+        API_VERSION: ${{ inputs.apiVersion }}
+        NUMBER_OF_ENDUSERS: ${{ inputs.numberOfEndUsers }}
+        TEST_SUITE_PATH: ${{ inputs.testSuitePath }}
+        VUS: ${{ inputs.vus }}
+        DURATION: ${{ inputs.duration }}
+        PARALLELISM: ${{ inputs.parallelism }}
+        ABORT_ON_FAIL: ${{ inputs.abortOnFail }}
+        BREAKPOINT: ${{ inputs.breakpoint }}

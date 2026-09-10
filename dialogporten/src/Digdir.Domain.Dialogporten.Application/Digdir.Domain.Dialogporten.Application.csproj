@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <!-- In order to support doc blocks for Swagger generation in PatchDialogsController.cs -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>1591</NoWarn> <!-- Disable warnings for missing XML comments -->
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="AsyncKeyedLock" Version="8.0.2" />
+        <PackageReference Include="AutoMapper" Version="14.0.0"/>
+        <PackageReference Include="HtmlAgilityPack" Version="1.12.4"/>
+        <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1"/>
+        <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+        <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.11" />
+        <PackageReference Include="Npgsql" Version="10.0.3" />
+        <PackageReference Include="MediatR" Version="12.5.0"/>
+        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+        <PackageReference Include="NSec.Cryptography" Version="25.4.0"/>
+        <PackageReference Include="OneOf" Version="3.0.271"/>
+        <PackageReference Include="OneOf.SourceGenerator" Version="3.0.271"/>
+        <PackageReference Include="Scrutor" Version="7.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Digdir.Domain.Dialogporten.Domain\Digdir.Domain.Dialogporten.Domain.csproj"/>
+        <ProjectReference Include="..\Digdir.Library.Entity.EntityFrameworkCore\Digdir.Library.Entity.EntityFrameworkCore.csproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="Digdir.Domain.Dialogporten.Application.Integration.Tests"/>
+        <InternalsVisibleTo Include="Digdir.Domain.Dialogporten.Application.Unit.Tests"/>
+        <InternalsVisibleTo Include="DynamicProxyGenAssembly2"/>
+    </ItemGroup>
+
+</Project>

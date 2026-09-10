@@ -1,0 +1,39 @@
+query getAllDialogsForParties(
+  $partyURIs: [String!]
+  $search: String
+  $org: [String!]
+  $status: [DialogStatus!]
+  $continuationToken: String
+  $limit: Int
+  $label: [SystemLabel!]
+  $updatedAfter: DateTime
+  $updatedBefore: DateTime
+  $searchLanguageCode: String
+  $serviceResources: [String!]
+  $isContentSeen: Boolean
+) {
+  searchDialogs(
+    input: {
+      party: $partyURIs
+      search: $search
+      org: $org
+      status: $status
+      continuationToken: $continuationToken
+      orderBy: { createdAt: null, updatedAt: null, dueAt: null, contentUpdatedAt: DESC }
+      systemLabel: $label
+      contentUpdatedAfter: $updatedAfter
+      contentUpdatedBefore: $updatedBefore
+      limit: $limit
+      excludeApiOnly: true
+      searchLanguageCode: $searchLanguageCode
+      serviceResource: $serviceResources
+      isContentSeen: $isContentSeen
+    }
+  ) {
+    items {
+      ...SearchDialogFields
+    }
+    hasNextPage
+    continuationToken
+  }
+}

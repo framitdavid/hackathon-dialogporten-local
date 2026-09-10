@@ -1,0 +1,193 @@
+using AwesomeAssertions;
+using Digdir.Domain.Dialogporten.Application.Common.ReturnTypes;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Common.Actors;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.Dialogs.Queries.Get;
+using Digdir.Domain.Dialogporten.Application.Features.V1.ServiceOwner.EndUserContext.Commands.SetSystemLabels;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Common;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Common.ApplicationFlow;
+using Digdir.Domain.Dialogporten.Application.Integration.Tests.Features.V1.Common.Extensions;
+using Digdir.Domain.Dialogporten.Domain.Actors;
+using Digdir.Domain.Dialogporten.Domain.DialogEndUserContexts.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities.Transmissions;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using NSubstitute;
+using static Digdir.Domain.Dialogporten.Application.Integration.Tests.Common.Common;
+
+namespace Digdir.Domain.Dialogporten.Application.Integration.Tests.Features.V1.ServiceOwner.SystemLabels.Commands;
+
+[Collection(nameof(DialogCqrsCollectionFixture))]
+public class SetSystemLabelTests(DialogApplication application) : ApplicationCollectionFixture(application)
+{
+    private const string AdminPerformedByActorId = "urn:altinn:organization:identifier-no:991825827";
+
+    [Fact]
+    public Task Set_Updates_System_Label() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .SetSystemLabelsServiceOwner(x => x.AddLabels = [SystemLabel.Values.Bin])
+            .SendCommand((_, ctx) => GetDialog(ctx.GetDialogId()))
+            .ExecuteAndAssert<DialogDto>(x =>
+                x.EndUserContext.SystemLabels.FirstOrDefault().Should().Be(SystemLabel.Values.Bin));
+
+    [Fact]
+    public Task Set_Returns_ConcurrencyError_On_Revision_Mismatch() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .SetSystemLabelsServiceOwner(x =>
+            {
+                x.IfMatchEndUserContextRevision = NewUuidV7();
+                x.AddLabels = [SystemLabel.Values.Bin];
+            })
+            .ExecuteAndAssert<ConcurrencyError>();
+
+    [Fact]
+    public Task Set_Returns_Forbidden_On_Unauthorized() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .ConfigureAltinnAuthorization(altinnAuthorization =>
+            {
+                altinnAuthorization
+                    .HasListAuthorizationForDialog(Arg.Any<DialogEntity>(), Arg.Any<CancellationToken>())
+                    .Returns(false);
+            })
+            .SetSystemLabelsServiceOwner(x =>
+            {
+                x.AddLabels = [SystemLabel.Values.Bin];
+            })
+            .ExecuteAndAssert<Forbidden>();
+
+    [Fact]
+    public async Task Set_Succeeds_On_Revision_Match()
+    {
+        Guid? dialogId = NewUuidV7();
+        string? party = null;
+        Guid? revision = null;
+
+        await FlowBuilder.For(Application)
+            .CreateSimpleDialog((x, _) => x.Dto.Id = dialogId)
+            .GetServiceOwnerDialog()
+            .AssertResult<DialogDto>(x =>
+            {
+                party = x.Party;
+                revision = x.EndUserContext.Revision;
+            })
+            .SendCommand(_ => new SetSystemLabelCommand
+            {
+                EndUserId = party!,
+                DialogId = dialogId.Value,
+                IfMatchEndUserContextRevision = revision!.Value,
+                AddLabels = [SystemLabel.Values.Bin]
+            })
+            .SendCommand(_ => GetDialog(dialogId))
+            .ExecuteAndAssert<DialogDto>(x =>
+                x.EndUserContext.SystemLabels.FirstOrDefault().Should().Be(SystemLabel.Values.Bin));
+    }
+
+    [Fact]
+    public Task Can_Set_And_Remove_MarkedAsUnopened_Label() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .SetSystemLabelsServiceOwner(x =>
+                x.AddLabels = [SystemLabel.Values.MarkedAsUnopened])
+            .SendCommand((_, ctx) => GetDialog(ctx.GetDialogId()))
+            .AssertResult<DialogDto>(x =>
+            {
+                x.EndUserContext.SystemLabels.Should().ContainSingle(x => x == SystemLabel.Values.MarkedAsUnopened);
+                x.EndUserContext.SystemLabels.Should().ContainSingle(x => x == SystemLabel.Values.Default);
+            })
+            .SendCommand((_, ctx) => new SetSystemLabelCommand
+            {
+                EndUserId = ctx.GetParty(),
+                DialogId = ctx.GetDialogId(),
+                RemoveLabels = [SystemLabel.Values.MarkedAsUnopened]
+            })
+            .SendCommand((_, ctx) => GetDialog(ctx.GetDialogId()))
+            .ExecuteAndAssert<DialogDto>(x =>
+            {
+                x.EndUserContext.SystemLabels.Should().NotContain(x => x == SystemLabel.Values.MarkedAsUnopened);
+                x.EndUserContext.SystemLabels.Should().ContainSingle(x => x == SystemLabel.Values.Default);
+            });
+
+    [Fact]
+    public Task Cannot_Set_Sent_System_Label() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .SetSystemLabelsServiceOwner(x =>
+                x.AddLabels = [SystemLabel.Values.Sent])
+            .ExecuteAndAssert<ValidationError>(x =>
+                x.ShouldHaveErrorWithText(
+                    ValidationErrorStrings.SentLabelNotAllowed));
+
+    [Fact]
+    public Task Cannot_Remove_Existing_Sent_System_Label() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog((x, _) =>
+                x.AddTransmission(x =>
+                    x.Type = DialogTransmissionType.Values.Submission))
+            .SetSystemLabelsServiceOwner(x =>
+                x.RemoveLabels = [SystemLabel.Values.Sent])
+            .ExecuteAndAssert<ValidationError>(x =>
+                x.ShouldHaveErrorWithText(
+                    ValidationErrorStrings.SentLabelNotAllowed));
+
+    [Fact]
+    public async Task Set_Allows_PerformedBy_For_Admin()
+    {
+        await FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .AsAdminUser()
+            .SetSystemLabelsServiceOwner(command =>
+            {
+                command.EndUserId = null;
+                command.PerformedBy = new ActorDto
+                {
+                    ActorType = ActorType.Values.PartyRepresentative,
+                    ActorId = AdminPerformedByActorId
+                };
+                command.AddLabels = [SystemLabel.Values.Archive];
+            })
+            .SendCommand((_, ctx) => GetDialog(ctx.GetDialogId()))
+            .ExecuteAndAssert<DialogDto>(x =>
+                x.EndUserContext.SystemLabels.Should().ContainSingle(label => label == SystemLabel.Values.Archive));
+
+        await AssertPerformedByActorAsync();
+    }
+
+    [Fact]
+    public Task Set_PerformedBy_For_Non_Admin_Is_Forbidden() =>
+        FlowBuilder.For(Application)
+            .CreateSimpleDialog()
+            .SetSystemLabelsServiceOwner(command =>
+            {
+                command.EndUserId = null;
+                command.PerformedBy = new ActorDto
+                {
+                    ActorType = ActorType.Values.PartyRepresentative,
+                    ActorId = AdminPerformedByActorId
+                };
+                command.AddLabels = [SystemLabel.Values.Archive];
+            })
+            .ExecuteAndAssert<Forbidden>();
+
+    private static GetDialogQuery GetDialog(Guid? id) => new() { DialogId = id!.Value };
+
+    private async Task AssertPerformedByActorAsync()
+    {
+        using var scope = Application.GetServiceProvider().CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<IDialogDbContext>();
+        var expectedLabelName = SystemLabel.Values.Archive.ToNamespacedName();
+
+        var log = await dbContext.LabelAssignmentLogs
+            .Include(x => x.PerformedBy)
+            .ThenInclude(x => x.ActorNameEntity)
+            .SingleAsync(x => x.Name == expectedLabelName);
+
+        log.PerformedBy.ActorTypeId.Should().Be(ActorType.Values.PartyRepresentative);
+        log.PerformedBy.ActorNameEntity.Should().NotBeNull();
+        log.PerformedBy.ActorNameEntity.ActorId.Should().Be(AdminPerformedByActorId);
+    }
+}

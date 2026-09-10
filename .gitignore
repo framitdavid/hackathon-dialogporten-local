@@ -1,0 +1,20 @@
+# Genereres av start.sh — inneholder maskinlokal krypteringsnøkkel
+dialogporten-frontend/.env
+dialogporten/.env
+
+# Sertifikater, genereres av start.sh
+dialogporten-frontend/certs/*
+!dialogporten-frontend/certs/.gitkeep
+
+# Byggeartefakter
+node_modules/
+**/bin/
+**/obj/
+dist/
+.turbo/
+test-results/
+playwright-report/
+blob-report/
+axe-reports/
+playwright/.cache/
+.DS_Store

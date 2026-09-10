@@ -1,0 +1,446 @@
+using System.Collections.Concurrent;
+using System.Collections.ObjectModel;
+using System.Reflection;
+using AutoMapper;
+using AwesomeAssertions;
+using Digdir.Domain.Dialogporten.Application.Common;
+using Digdir.Domain.Dialogporten.Application.Common.Authorization;
+using Digdir.Domain.Dialogporten.Application.Common.Behaviours.FeatureMetric;
+using Digdir.Domain.Dialogporten.Application.Common.Extensions;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Application.Externals.Presentation;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.Localizations;
+using Digdir.Domain.Dialogporten.Infrastructure;
+using Digdir.Domain.Dialogporten.Application.Features.V1.Common.ServiceResourceMetadata;
+using Digdir.Domain.Dialogporten.Infrastructure.Altinn.Authorization;
+using Digdir.Domain.Dialogporten.Infrastructure.ServiceResourceMetadata;
+using Digdir.Domain.Dialogporten.Infrastructure.Altinn.ResourceRegistry;
+using Digdir.Domain.Dialogporten.Infrastructure.Common.Configurations.Dapper;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Interceptors;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories.DialogSearch.Abstractions;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories.DialogSearch.EndUser;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories.DialogSearch.EndUser.Selection;
+using Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories.DialogSearch.EndUser.Strategies;
+using Digdir.Library.Entity.Abstractions.Features.Lookup;
+using HotChocolate.Subscriptions;
+using MassTransit;
+using MediatR;
+using MediatR.NotificationPublishers;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
+using Npgsql;
+using NSubstitute;
+using Respawn;
+using Respawn.Graph;
+using Testcontainers.PostgreSql;
+using ZiggyCreatures.Caching.Fusion;
+using ZiggyCreatures.Caching.Fusion.NullObjects;
+
+namespace Digdir.Domain.Dialogporten.Application.Integration.Tests.Common;
+
+// ReSharper disable once ClassNeverInstantiated.Global
+public class DialogApplication : IAsyncLifetime
+{
+    private IMapper? _mapper;
+    private Respawner _respawner = null!;
+    private ServiceProvider _rootProvider = null!;
+    private ServiceProvider _fixtureRootProvider = null!;
+    private readonly ConcurrentQueue<object> _publishedEvents = [];
+
+    internal static TestClock Clock { get; } = new();
+    internal static TestUser User { get; } = new();
+    internal static TestAltinnAuthorization AltinnAuthorization { get; } = new();
+    internal static TestServiceResourceAuthorizer ServiceResourceAuthorizer { get; } = new();
+    internal static TestApplicationSettings Settings { get; } = new();
+
+    private readonly PostgreSqlContainer _dbContainer =
+        new PostgreSqlBuilder("postgres:18.3")
+            .Build();
+
+    public async ValueTask InitializeAsync()
+    {
+        var config = new MapperConfiguration(cfg =>
+        {
+            cfg.AddMaps(Assembly.GetAssembly(typeof(ApplicationSettings)));
+        });
+        _mapper = config.CreateMapper();
+
+        var timeSpanAllowance = TimeSpan.FromMicroseconds(5);
+        AssertionConfiguration.Current.Equivalency.Modify(options => options
+            .Using<DateTimeOffset>(ctx =>
+                ctx.Subject.Should().BeCloseTo(ctx.Expectation, timeSpanAllowance))
+            .WhenTypeIs<DateTimeOffset>()
+        );
+
+        _fixtureRootProvider = _rootProvider = BuildServiceCollection().BuildServiceProvider();
+
+        await _dbContainer.StartAsync();
+        await EnsureDatabaseAsync();
+        await BuildRespawnState();
+
+    }
+
+    /// <summary>
+    /// This method lets you configure the IoC container for an integration test.
+    /// It will be reset to the default configuration after each test.
+    /// You may only call this or equivalent methods once per test.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown if the method is called more than once per test.</exception>
+    [Obsolete("We should not need to override services for any tests. If we do, we should consider using the same pattern as for TestUser and TestClock.")]
+    public void ConfigureServices(Action<IServiceCollection> configure)
+    {
+        if (_rootProvider != _fixtureRootProvider)
+        {
+            throw new InvalidOperationException($"Only one call to {nameof(ConfigureServices)} or equivalent methods are allowed per test.");
+        }
+
+        var serviceCollection = BuildServiceCollection();
+        configure(serviceCollection);
+        _rootProvider = serviceCollection.BuildServiceProvider();
+    }
+
+    private IServiceCollection BuildServiceCollection()
+    {
+        var serviceCollection = new ServiceCollection();
+
+        var publishEndpointSubstitute = Substitute.For<IPublishEndpoint>();
+        publishEndpointSubstitute
+            .When(x => x.Publish(Arg.Any<object>(), Arg.Any<Type>(), Arg.Any<CancellationToken>()))
+            .Do(x => _publishedEvents.Enqueue(x[0]));
+
+        return serviceCollection
+            .AddApplication(Substitute.For<IConfiguration>(), Substitute.For<IHostEnvironment>())
+            .ReplaceTransient<INotificationPublisher, ForeachAwaitPublisher>()
+            .RemoveAll<IClock>()
+            .AddSingleton<IClock>(Clock)
+            .AddSingleton<IUser>(User)
+            .RemoveAll<IServiceResourceAuthorizer>()
+            .AddSingleton<IServiceResourceAuthorizer>(ServiceResourceAuthorizer)
+            .AddDistributedMemoryCache()
+            .AddLogging()
+            .AddScoped<ConvertDomainEventsToOutboxMessagesInterceptor>()
+            .AddScoped<PopulateActorNameInterceptor>()
+            .AddTransient(x => new Lazy<IPublishEndpoint>(x.GetRequiredService<IPublishEndpoint>))
+            .AddSingleton<NpgsqlDataSource>(_ => new NpgsqlDataSourceBuilder(_dbContainer.GetConnectionString() + ";Include Error Detail=true").Build())
+            .AddDbContext<DialogDbContext>((services, options) =>
+                options.UseNpgsql(services.GetRequiredService<NpgsqlDataSource>(), o =>
+                    {
+                        o.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
+                    })
+                    .EnableSensitiveDataLogging()
+                    .EnableDetailedErrors()
+                    .AddInterceptors(services.GetRequiredService<ConvertDomainEventsToOutboxMessagesInterceptor>())
+                    .AddInterceptors(services.GetRequiredService<PopulateActorNameInterceptor>())
+            )
+            .AddDapperTypeHandlers()
+            .AddScoped<IDialogDbContext>(x => x.GetRequiredService<DialogDbContext>())
+            .AddTransient<ISubjectResourceRepository, SubjectResourceRepository>()
+            .AddTransient<IResourcePolicyInformationRepository, ResourcePolicyInformationRepository>()
+            .AddScoped<IResourceRegistry, LocalDevelopmentResourceRegistry>()
+            .AddScoped<IServiceOwnerNameRegistry>(_ => CreateServiceOwnerNameRegistrySubstitute())
+            .AddScoped<IAccessManagementMetadata>(_ => CreateAccessManagementMetadataSubstitute())
+            .AddScoped<IMetadataLinkProvider>(_ => CreateMetadataLinkProviderSubstitute())
+            .AddScoped<IPartyNameRegistry>(_ => CreateNameRegistrySubstitute())
+            .AddSingleton(Settings)
+            .AddScoped<IOptionsSnapshot<ApplicationSettings>>(x => x.GetRequiredService<TestApplicationSettings>())
+            .AddScoped<IOptions<ApplicationSettings>>(x => x.GetRequiredService<TestApplicationSettings>())
+            .AddSingleton<IFusionCacheProvider>(_ => CreateNullFusionCacheProvider())
+            .AddScoped<ITopicEventSender>(_ => Substitute.For<ITopicEventSender>())
+            .AddScoped<IPublishEndpoint>(_ => publishEndpointSubstitute)
+            .AddScoped<Lazy<ITopicEventSender>>(sp => new Lazy<ITopicEventSender>(() => sp.GetRequiredService<ITopicEventSender>()))
+            .AddScoped<Lazy<IPublishEndpoint>>(sp => new Lazy<IPublishEndpoint>(() => sp.GetRequiredService<IPublishEndpoint>()))
+            .AddScoped<IUnitOfWork, UnitOfWork>()
+            .AddTransient<ITransmissionHierarchyRepository, TransmissionHierarchyRepository>()
+            .AddTransient<IDialogSeenLogWriter, DialogSeenLogWriter>()
+            .AddSingleton(AltinnAuthorization)
+            .AddScoped<LocalDevelopmentAltinnAuthorization>()
+            .AddScoped<IAltinnAuthorization, RoutedAltinnAuthorization>()
+            .AddTransient<IAuthorizedServiceResourcesProvider, AuthorizedServiceResourcesProvider>()
+            .AddTransient<IServiceResourceMetadataCatalogue, ServiceResourceMetadataCatalogue>()
+            .AddSingleton<ICloudEventBus, IntegrationTestCloudBus>()
+            .AddScoped<IFeatureMetricServiceResourceCache, TestFeatureMetricServiceResourceCache>()
+            .AddTransient<ISearchStrategySelector<EndUserSearchContext>, DialogEndUserSearchStrategySelector>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, SinglePartyFtsStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, SingleServiceFtsStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, MultiServiceFtsStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, MultiPartyFtsStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, SinglePartyStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, SingleServiceStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, MultiPartyStrategy>()
+            .AddTransient<IQueryStrategy<EndUserSearchContext>, MultiServiceStrategy>()
+            .AddTransient<IPartyResourceReferenceRepository, PartyResourceRepository>()
+            .AddTransient<IDialogSearchRepository, DialogSearchRepository>();
+    }
+
+    private static IPartyNameRegistry CreateNameRegistrySubstitute()
+    {
+        var nameRegistrySubstitute = Substitute.For<IPartyNameRegistry>();
+
+        nameRegistrySubstitute
+            .GetName(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns("Brando Sando");
+
+        nameRegistrySubstitute
+            .GetName(Arg.Is(TestUsers.DefaultSystemUserUrn), Arg.Any<CancellationToken>())
+            .Returns("Mock system user name");
+
+        return nameRegistrySubstitute;
+    }
+
+    private static IServiceOwnerNameRegistry CreateServiceOwnerNameRegistrySubstitute()
+    {
+        var organizationRegistrySubstitute = Substitute.For<IServiceOwnerNameRegistry>();
+
+        organizationRegistrySubstitute
+            .GetServiceOwnerInfo(Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new ServiceOwnerInfo
+            {
+                OrgNumber = "991825827",
+                ShortName = "digdir"
+            });
+
+        organizationRegistrySubstitute
+            .GetServiceOwnerInfo(Arg.Any<IReadOnlyCollection<string>>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                var orgNumbers = callInfo.ArgAt<IReadOnlyCollection<string>>(0);
+                return orgNumbers
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(
+                        x => x,
+                        x => new ServiceOwnerInfo
+                        {
+                            OrgNumber = x,
+                            ShortName = "digdir"
+                        },
+                        StringComparer.OrdinalIgnoreCase);
+            });
+
+        return organizationRegistrySubstitute;
+    }
+
+    private static IAccessManagementMetadata CreateAccessManagementMetadataSubstitute()
+    {
+        var metadataSubstitute = Substitute.For<IAccessManagementMetadata>();
+
+        metadataSubstitute
+            .GetMetadata(Arg.Any<CancellationToken>())
+            .Returns(new AccessManagementMetadata(
+                new Dictionary<string, AccessManagementRoleMetadata>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["urn:altinn:rolecode:DIALOG_READ"] = new(
+                        Guid.Parse("11111111-1111-1111-1111-111111111111"),
+                        "urn:altinn:rolecode:DIALOG_READ",
+                        [new LocalizationDto { LanguageCode = "nb", Value = "Dialogleser" }],
+                        new LinkDto { Metadata = "https://platform.example/accessmanagement/api/v1/meta/info/roles/11111111-1111-1111-1111-111111111111" })
+                },
+                new Dictionary<string, AccessManagementAccessPackageMetadata>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["urn:altinn:accesspackage:dialog_lookup_package"] = new(
+                        "urn:altinn:accesspackage:dialog_lookup_package",
+                        [new LocalizationDto { LanguageCode = "nb", Value = "Dialogoppslagspakke" }],
+                        new LinkDto { Metadata = "https://platform.example/accessmanagement/api/v1/meta/info/accesspackages/package/urn/urn:altinn:accesspackage:dialog_lookup_package" })
+                }));
+
+        return metadataSubstitute;
+    }
+
+    private static IMetadataLinkProvider CreateMetadataLinkProviderSubstitute()
+    {
+        var metadataLinkProvider = Substitute.For<IMetadataLinkProvider>();
+
+        metadataLinkProvider
+            .GetServiceResourceMetadataLink(Arg.Any<string>())
+            .Returns(x => $"https://platform.example/resourceregistry/api/v1/resource/{x.Arg<string>()}");
+        metadataLinkProvider
+            .GetRoleMetadataLink(Arg.Any<Guid>())
+            .Returns(x => $"https://platform.example/accessmanagement/api/v1/meta/info/roles/{x.Arg<Guid>()}");
+        metadataLinkProvider
+            .GetAccessPackageMetadataLink(Arg.Any<string>())
+            .Returns(x => $"https://platform.example/accessmanagement/api/v1/meta/info/accesspackages/package/urn/{x.Arg<string>()}");
+
+        return metadataLinkProvider;
+    }
+
+    private static IFusionCacheProvider CreateNullFusionCacheProvider()
+    {
+        var cacheProviderSubstitute = Substitute.For<IFusionCacheProvider>();
+
+        cacheProviderSubstitute
+            .GetCache(Arg.Any<string>())
+            .Returns(_ => new NullFusionCache(Options.Create(new FusionCacheOptions())));
+
+        return cacheProviderSubstitute;
+    }
+
+    public IMapper GetMapper() => _mapper!;
+
+    public async ValueTask DisposeAsync()
+    {
+        await _rootProvider.DisposeAsync();
+        await _fixtureRootProvider.DisposeAsync();
+        await _dbContainer.DisposeAsync();
+        GC.SuppressFinalize(this);
+    }
+
+    public async Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default)
+    {
+        using var scope = _rootProvider.CreateScope();
+        var mediator = scope.ServiceProvider.GetRequiredService<ISender>();
+        return await mediator.Send(request, cancellationToken);
+    }
+
+    public async Task<List<object>> PublishEvents()
+    {
+        var publishedEvents = new List<object>();
+        while (GetPublishedEvents().Count != 0)
+        {
+            foreach (var value in PopPublishedEvents())
+            {
+                using var scope = _rootProvider.CreateScope();
+                var mediator = scope.ServiceProvider.GetRequiredService<IPublisher>();
+                await mediator.Publish(value);
+                publishedEvents.Add(value);
+            }
+        }
+
+        return publishedEvents;
+    }
+
+    public async ValueTask ResetState()
+    {
+        Clock.Reset();
+        User.Reset();
+        AltinnAuthorization.Reset();
+        ServiceResourceAuthorizer.Reset();
+        Settings.Reset();
+        _publishedEvents.Clear();
+        await using var connection = new NpgsqlConnection(_dbContainer.GetConnectionString());
+        await connection.OpenAsync();
+        await _respawner.ResetAsync(connection);
+        if (_rootProvider != _fixtureRootProvider)
+        {
+            await _rootProvider.DisposeAsync();
+            _rootProvider = _fixtureRootProvider;
+        }
+    }
+
+    private async Task EnsureDatabaseAsync()
+    {
+        using var scope = _rootProvider.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<DialogDbContext>();
+        await context.Database.MigrateAsync();
+    }
+
+    private async Task BuildRespawnState()
+    {
+        await using var connection = new NpgsqlConnection(_dbContainer.GetConnectionString());
+        await connection.OpenAsync();
+        _respawner = await Respawner.CreateAsync(connection, new()
+        {
+            DbAdapter = DbAdapter.Postgres,
+            TablesToIgnore = new[]
+                {
+                    new Table("__EFMigrationsHistory")
+                }
+                .Concat(GetLookupTables())
+                .ToArray()
+        });
+    }
+
+    public ReadOnlyCollection<object> GetPublishedEvents() => _publishedEvents.ToList().AsReadOnly();
+
+    public List<object> PopPublishedEvents()
+    {
+        var eventsList = _publishedEvents.ToList();
+        _publishedEvents.Clear();
+        return eventsList;
+    }
+
+    public ServiceProvider GetServiceProvider() => _rootProvider;
+
+    public async Task<List<T>> GetDbEntities<T>() where T : class
+    {
+        using var scope = _rootProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<DialogDbContext>();
+        return await db
+            .Set<T>()
+            .AsNoTracking()
+            .ToListAsync();
+    }
+
+    public static IQueryable<T> QueryDbEntities<T>(IServiceScope scope) where T : class
+    {
+        var db = scope.ServiceProvider.GetRequiredService<DialogDbContext>();
+        return db
+            .Set<T>()
+            .AsNoTracking();
+    }
+
+    private ReadOnlyCollection<Table> GetLookupTables()
+    {
+        using var scope = _rootProvider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<DialogDbContext>();
+        return db.Model.GetEntityTypes()
+            .Where(x => typeof(ILookupEntity).IsAssignableFrom(x.ClrType))
+            .Select(x => new Table(x.GetTableName()!))
+            .ToList()
+            .AsReadOnly();
+    }
+
+    public void PurgeEvents() => _publishedEvents.Clear();
+}
+
+/// <summary>
+/// Test implementation that mimics the real FeatureMetricServiceResourceCache behavior
+/// by querying the database and using the ResourceRegistry, but with simple in-memory caching.
+/// </summary>
+internal sealed class TestFeatureMetricServiceResourceCache : IFeatureMetricServiceResourceCache
+{
+    private readonly Dictionary<Guid, ServiceResourceInformation?> _cache = new();
+    private readonly IDialogDbContext _db;
+    private readonly IResourceRegistry _resourceRegistry;
+
+    public TestFeatureMetricServiceResourceCache(IDialogDbContext db, IResourceRegistry resourceRegistry)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(resourceRegistry);
+
+        _db = db;
+        _resourceRegistry = resourceRegistry;
+    }
+
+    public async Task<ServiceResourceInformation?> GetServiceResource(Guid dialogId, CancellationToken cancellationToken)
+    {
+        if (_cache.TryGetValue(dialogId, out var cached))
+        {
+            return cached;
+        }
+
+        var serviceResource = await GetServiceResourceFromDb(dialogId, cancellationToken);
+        if (serviceResource != null)
+        {
+            var result = await _resourceRegistry.GetResourceInformation(serviceResource, cancellationToken);
+            _cache[dialogId] = result;
+            return result;
+        }
+
+        _cache[dialogId] = null;
+        return null;
+    }
+
+    private async Task<string?> GetServiceResourceFromDb(Guid dialogId, CancellationToken cancellationToken)
+    {
+        return await _db.Dialogs
+            .Where(x => x.Id == dialogId)
+            .Select(x => x.ServiceResource)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+}

@@ -1,0 +1,66 @@
+﻿name: Dispatch Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - yt01
+          - staging
+          - prod
+      version:
+        description: "Version to deploy (e.g., `1.23.4`)"
+        required: true
+        type: string
+      runMigration:
+        description: "Run migrations"
+        default: false
+        required: false
+        type: boolean
+
+
+run-name: Dispatch apps ${{ inputs.environment }} v${{ inputs.version }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ inputs.environment }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+
+  generate-git-short-sha:
+    name: Generate git short sha
+    uses: ./.github/workflows/workflow-generate-git-short-sha.yml
+
+  get-current-version:
+    name: Get current version
+    uses: ./.github/workflows/workflow-get-current-version.yml
+
+  deploy-apps:
+    name: Deploy apps to ${{ inputs.environment }} (v${{ inputs.version }})
+    needs:
+      - generate-git-short-sha
+      - get-current-version
+    uses: ./.github/workflows/workflow-deploy-apps.yml
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP_NAME: ${{ secrets.AZURE_RESOURCE_GROUP_NAME }}
+      AZURE_ENVIRONMENT_KEY_VAULT_NAME: ${{ secrets.AZURE_ENVIRONMENT_KEY_VAULT_NAME }}
+      AZURE_CONTAINER_APP_ENVIRONMENT_NAME: ${{ secrets.AZURE_CONTAINER_APP_ENVIRONMENT_NAME }}
+      AZURE_APP_INSIGHTS_CONNECTION_STRING: ${{ secrets.AZURE_APP_INSIGHTS_CONNECTION_STRING }}
+      AZURE_APP_CONFIGURATION_NAME: ${{ secrets.AZURE_APP_CONFIGURATION_NAME }}
+      AZURE_SERVICE_BUS_NAMESPACE_NAME: ${{ secrets.AZURE_SERVICE_BUS_NAMESPACE_NAME }}
+    with:
+      environment: ${{ inputs.environment }}
+      version: ${{ inputs.version }}
+      runMigration: ${{ inputs.runMigration }}
+      ref: "refs/tags/v${{ inputs.version }}"

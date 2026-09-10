@@ -1,0 +1,295 @@
+import {
+  type FilterState,
+  type GlobalHeaderProps,
+  QueryLabel,
+  type ToolbarSearchProps,
+  useAccountSelector,
+} from '@altinn/altinn-components';
+import type { ChangeEvent } from 'react';
+import { useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Link, type LinkProps, useLocation, useNavigate } from 'react-router';
+import { Analytics } from '../../analytics/analytics.ts';
+import { ANALYTICS_EVENTS } from '../../analytics/analyticsEvents.ts';
+import { useParties } from '../../api/hooks/useParties.ts';
+import { updateLanguage } from '../../api/queries.ts';
+import { createFiltersURLQuery, getFrontPageLink } from '../../auth/url.ts';
+import { useErrorLogger } from '../../hooks/useErrorLogger';
+import { FilterCategory } from '../../pages/Inbox/filters.tsx';
+import { FixedGlobalQueryParams, pruneSearchQueryParams } from '../../pages/Inbox/queryParams.ts';
+import { useProfile } from '../../pages/Profile/useProfile.tsx';
+import { PageRoutes } from '../../pages/routes.ts';
+import { useGlobalMenu } from './GlobalMenu/useGlobalMenu.ts';
+import { mapPartiesToAuthorizedParties } from './mapPartyToAuthorizedParty';
+import { getSearchLabels, pruneSearchValue } from './Search/getSearchLabels.ts';
+import { useSearchString } from './Search/useSearchString.ts';
+
+interface UseHeaderConfigOutput {
+  headerProps: GlobalHeaderProps;
+  inboxSearch: ToolbarSearchProps;
+}
+
+export const useHeaderConfig = (filterState?: FilterState): UseHeaderConfigOutput => {
+  const { currentEndUser, parties, selectedParties, isLoading, currentPartyUuid, setSelectedPartyIds, partyGraph } =
+    useParties();
+  const { t, i18n } = useTranslation();
+  const { logError } = useErrorLogger();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isProfile = location.pathname.includes(PageRoutes.profile);
+  const { searchValue, setSearchValue, onClear } = useSearchString();
+
+  const {
+    favoritesGroup,
+    addFavoriteParty,
+    deleteFavoriteParty,
+    updateProfileLanguage,
+    shouldShowDeletedEntities,
+    updateShowDeletedEntities,
+  } = useProfile();
+
+  const handleToggleFavorite = useCallback(
+    async (accountUuid: string) => {
+      const isFavorite = favoritesGroup?.parties?.includes(accountUuid);
+      try {
+        if (isFavorite) {
+          await deleteFavoriteParty(accountUuid);
+        } else {
+          await addFavoriteParty(accountUuid);
+        }
+      } catch (error) {
+        logError(
+          error as Error,
+          {
+            context: 'useHeaderConfig.handleToggleFavorite',
+            accountUuid,
+            action: isFavorite ? 'remove' : 'add',
+          },
+          'Error toggling favorite party',
+        );
+      }
+    },
+    [favoritesGroup?.parties, addFavoriteParty, deleteFavoriteParty, logError],
+  );
+
+  const handleSelectAccount = useCallback(
+    (accountUuid: string) => {
+      const targetRoute = isProfile ? PageRoutes.profile : PageRoutes.inbox;
+      const party = partyGraph.partyByUuid.get(accountUuid);
+
+      if (!party) {
+        console.error('Selected party not found:', accountUuid);
+        return;
+      }
+
+      /* Selected party already selected */
+      if (selectedParties.length === 1 && selectedParties[0].party === party.party) {
+        return;
+      }
+
+      if (party.partyType === 'Person') {
+        setSelectedPartyIds([party.party], null);
+        if (location.pathname.startsWith('/inbox/')) {
+          navigate(PageRoutes.inbox);
+        }
+      } else {
+        const search = new URLSearchParams(location.search);
+        search.set('party', party.party);
+        search.delete('allParties');
+        search.delete(FixedGlobalQueryParams.group);
+        search.delete(FixedGlobalQueryParams.subAccounts);
+        navigate(`${targetRoute}?${search.toString()}`, {
+          replace: location.pathname === targetRoute,
+        });
+      }
+    },
+    [isProfile, partyGraph, selectedParties, setSelectedPartyIds, location.pathname, location.search, navigate],
+  );
+
+  const handleShowDeletedUnitsChange = useCallback(
+    async (shouldShow: boolean) => {
+      try {
+        await updateShowDeletedEntities(shouldShow);
+      } catch (error) {
+        logError(
+          error as Error,
+          {
+            context: 'useHeaderConfig.handleShowDeletedUnitsChange',
+            shouldShow,
+          },
+          'Error updating show deleted units setting',
+        );
+      }
+    },
+    [updateShowDeletedEntities, logError],
+  );
+
+  const partyListDTO = useMemo(() => mapPartiesToAuthorizedParties(parties), [parties]);
+
+  /* Must be referentially stable: useAccountSelector's full-list materialization memo depends on this
+   * array, so a fresh array per render re-runs that O(n) rebuild on every header render. */
+  const favoriteAccountUuids = useMemo(
+    () => (favoritesGroup?.parties ?? []).filter((uuid): uuid is string => uuid !== null && uuid !== undefined),
+    [favoritesGroup?.parties],
+  );
+
+  const selfAccountUuid = currentEndUser?.partyUuid;
+
+  const accountSelector = useAccountSelector({
+    partyListDTO,
+    favoriteAccountUuids,
+    currentAccountUuid: currentPartyUuid,
+    selfAccountUuid,
+    isLoading,
+    virtualized: partyListDTO.length > 20,
+    onSelectAccount: handleSelectAccount,
+    onToggleFavorite: handleToggleFavorite,
+    languageCode: i18n.language,
+    showDeletedUnits: shouldShowDeletedEntities ?? undefined,
+    onShowDeletedUnitsChange: handleShowDeletedUnitsChange,
+  });
+
+  const { mobileMenu, desktopMenu } = useGlobalMenu();
+
+  const handleUpdateLanguage = async (language: string) => {
+    if (language === i18n.language) return;
+    /* Update locally first so duplicate onSelect calls from the library
+       (desktop + mobile LocaleSwitchers) short-circuit on the guard above. */
+    updateProfileLanguage(language);
+    void i18n.changeLanguage(language);
+    try {
+      await updateLanguage(language);
+    } catch (error) {
+      logError(
+        error as Error,
+        {
+          context: 'useHeaderConfig.handleUpdateLanguage',
+          language,
+        },
+        'Error updating language',
+      );
+    }
+  };
+
+  const commonProps = {
+    logo: {
+      as: (props: LinkProps) => {
+        return <Link {...props} to={getFrontPageLink(i18n.language)} />;
+      },
+    },
+    locale: {
+      title: 'Språk/language',
+      options: [
+        { label: t('word.locale.nb'), value: 'nb', checked: i18n.language === 'nb' },
+        { label: t('word.locale.nn'), value: 'nn', checked: i18n.language === 'nn' },
+        { label: t('word.locale.en'), value: 'en', checked: i18n.language === 'en' },
+      ],
+      onSelect: (lang: string) => handleUpdateLanguage(lang),
+    },
+    mobileMenu,
+  };
+
+  const globalHeaderProps: GlobalHeaderProps = {
+    ...commonProps,
+    globalMenu: {
+      menuLabel: t('word.menu'),
+      menu: desktopMenu,
+      backLabel: t('word.back'),
+      logoutButton: {
+        label: t('word.log_out'),
+        onClick: () => {
+          Analytics.trackEvent(ANALYTICS_EVENTS.USER_LOGOUT, {
+            'logout.source': 'header',
+          });
+          (window as Window).location = `/api/logout`;
+        },
+      },
+    },
+    desktopMenu,
+    accountSelector,
+  };
+
+  const ignoreCountFor = ['fromDate', 'toDate', 'search'];
+  const activeFilters = Object.keys(filterState ?? {})
+    .filter((key) => !ignoreCountFor.includes(key))
+    .filter((key) => (filterState?.[key]?.length ?? 0) > 0);
+  const searchLabel = getSearchLabels(searchValue);
+
+  const inboxSearch: ToolbarSearchProps = {
+    id: 'inbox-toolbar-search',
+    collapsible: true,
+    value: searchValue,
+    hideLabel: true,
+    label: t('inbox.search.label'),
+    onClear,
+    onChange: (event: ChangeEvent<HTMLInputElement>) => {
+      const value = event.target.value;
+      if (value === '') {
+        onClear();
+      } else {
+        setSearchValue(value);
+      }
+    },
+    name: t('word.search'),
+    placeholder: t('inbox.search.placeholder'),
+    minLength: 3,
+    menu: {
+      groups: {
+        suggestions: {
+          title: '',
+        },
+      },
+      items: [
+        {
+          groupId: 'suggestions',
+          title: searchValue,
+          label: <QueryLabel params={searchLabel} />,
+          'aria-label': t('search.autocomplete.searchInInbox', { query: searchValue }),
+          onClick: () => {
+            const prunedSearchQuery = pruneSearchValue(searchValue);
+            navigate(`${location.pathname}${pruneSearchQueryParams(location.search, { search: prunedSearchQuery })}`);
+          },
+          as: 'button',
+          linkIcon: true,
+        },
+        {
+          groupId: 'suggestions',
+          title: searchValue,
+          'aria-label': t('search.autocomplete.searchInInbox_with_filters', {
+            query: searchValue,
+            count: activeFilters.length,
+          }),
+          hidden: activeFilters.length === 0,
+          label: (
+            <QueryLabel
+              params={[
+                ...searchLabel,
+                {
+                  type: 'filter',
+                  value: 'filters',
+                  label: t('search.autoComplete.activeFilters', { count: activeFilters.length }),
+                },
+              ]}
+            />
+          ),
+          onClick: () => {
+            const currentURL = new URL(window.location.href);
+            const allowedFilters = Object.values(FilterCategory);
+            const updatedURL = createFiltersURLQuery(filterState ?? {}, allowedFilters, currentURL.toString());
+            const searchParams = new URLSearchParams(updatedURL.searchParams);
+            searchParams.set('search', searchValue);
+            navigate(`${location.pathname}?${searchParams.toString()}`);
+          },
+          as: 'button',
+          linkIcon: true,
+        },
+      ],
+      onClose: () => {},
+    },
+  };
+
+  return {
+    headerProps: globalHeaderProps,
+    inboxSearch,
+  };
+};

@@ -1,0 +1,76 @@
+﻿using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace Digdir.Domain.Dialogporten.Infrastructure.Persistence.Configurations.Dialogs;
+
+internal sealed class DialogEntityConfiguration : IEntityTypeConfiguration<DialogEntity>
+{
+    public void Configure(EntityTypeBuilder<DialogEntity> builder)
+    {
+        builder.ToTable("Dialog");
+
+        builder.HasIndex(x => x.VisibleFrom);
+        builder.HasIndex(x => x.ServiceResource);
+        builder.HasIndex(x => new { x.Org, x.IdempotentKey }).IsUnique()
+            .HasFilter($"\"{nameof(DialogEntity.IdempotentKey)}\" is not null");
+
+        // Index specially optimized for querying dialogs without FTS in Arbeidsflate
+        builder.HasIndex(x => new { x.Party, x.ContentUpdatedAt, x.Id })
+            .HasDatabaseName("IX_Dialog_Party_ContentUpdatedAt_Id_Covering")
+            .IsDescending(false, true, true)
+            .IncludeProperties(x => new { x.ServiceResource, x.IsApiOnly, x.StatusId, x.Org, x.VisibleFrom, x.ExpiresAt })
+            .HasFilter($"\"{nameof(DialogEntity.Deleted)}\" = false");
+
+        // Index specially optimized for querying dialogs with FTS in Arbeidsflate / SO-API
+        builder.HasIndex(x => new { x.Id })
+            .HasDatabaseName("IX_Dialog_Id_Covering")
+            .IncludeProperties(x => new { x.ServiceResource, x.Deleted, x.IsApiOnly, x.StatusId, x.Org, x.VisibleFrom, x.ExpiresAt, x.ContentUpdatedAt });
+
+        builder.HasIndex(x => new { x.Party, x.CreatedAt, x.Id })
+            .IsDescending(false, true, true)
+            .IncludeProperties(x => x.ServiceResource)
+            .IsCreatedConcurrently();
+
+        builder.HasIndex(x => new { x.Party, x.UpdatedAt, x.Id })
+            .IsDescending(false, true, true)
+            .IncludeProperties(x => x.ServiceResource)
+            .IsCreatedConcurrently();
+
+        builder.HasIndex(x => new { x.Party, x.DueAt, x.Id })
+            .IsDescending(false, true, true)
+            .IncludeProperties(x => x.ServiceResource)
+            .IsCreatedConcurrently();
+
+        builder.HasIndex(x => new { x.Org, x.Party, x.ContentUpdatedAt, x.Id })
+            .IsDescending(false, false, true, true);
+
+        builder.HasIndex(x => new { x.Org, x.ServiceResource, x.ContentUpdatedAt, x.Id })
+            .IsDescending(false, false, true, true);
+
+        builder.HasIndex(x => new { x.Org, x.ContentUpdatedAt, x.Id })
+            .IsDescending(false, true, true);
+
+        builder.HasIndex(x => new { x.Org, x.CreatedAt, x.Id })
+            .IsDescending(false, true, true);
+
+        builder.HasIndex(x => new { x.Org, x.UpdatedAt, x.Id })
+            .IsDescending(false, true, true);
+
+        builder.HasIndex(x => new { x.ServiceResource, x.Party, x.ContentUpdatedAt, x.Id })
+            .HasDatabaseName("IX_Dialog_ServiceResource_Party_ContentUpdatedAt_Id_NotDeleted")
+            .IsDescending(false, false, true, true)
+            .IncludeProperties(x => new { x.StatusId, x.VisibleFrom, x.ExpiresAt, x.IsApiOnly, x.SystemLabelsMask })
+            .HasFilter($"\"{nameof(DialogEntity.Deleted)}\" = false");
+
+        builder.Property(x => x.Org).UseCollation("C");
+        builder.Property(x => x.Party).UseCollation("C");
+        builder.Property(x => x.ServiceResource).HasMaxLength(Domain.Common.Constants.DefaultMaxStringLength);
+        builder.Property(x => x.ServiceResource).UseCollation("C");
+        builder.Property(x => x.IdempotentKey).HasMaxLength(36);
+        builder.Property(x => x.ContentUpdatedAt).HasDefaultValueSql("current_timestamp at time zone 'utc'");
+        builder.Property(x => x.IsApiOnly).HasDefaultValue(false);
+        builder.Property(x => x.SystemLabelsMask).HasDefaultValue((short)1);
+        builder.Property(x => x.IsSeenSinceLastContentUpdate).HasDefaultValue(true);
+    }
+}

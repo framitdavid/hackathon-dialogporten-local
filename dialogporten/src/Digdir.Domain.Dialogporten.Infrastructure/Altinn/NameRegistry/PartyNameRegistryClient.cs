@@ -1,0 +1,230 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Digdir.Domain.Dialogporten.Application;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Domain.Common;
+using Digdir.Domain.Dialogporten.Domain.Parties;
+using Digdir.Domain.Dialogporten.Domain.Parties.Abstractions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using ZiggyCreatures.Caching.Fusion;
+
+namespace Digdir.Domain.Dialogporten.Infrastructure.Altinn.NameRegistry;
+
+internal sealed class PartyNameRegistryClient : IPartyNameRegistry
+{
+    private readonly IFusionCache _cache;
+    private readonly HttpClient _client;
+    private readonly ILogger<PartyNameRegistryClient> _logger;
+    private readonly IOptionsMonitor<ApplicationSettings> _applicationSettings;
+    private bool _useCorrectPersonNameOrdering;
+
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault
+    };
+
+    public PartyNameRegistryClient(
+        HttpClient client,
+        IFusionCacheProvider cacheProvider,
+        ILogger<PartyNameRegistryClient> logger,
+        IOptionsMonitor<ApplicationSettings> applicationSettings)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(cacheProvider);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(applicationSettings);
+
+        var cache = cacheProvider.GetCache(nameof(NameRegistry));
+        ArgumentNullException.ThrowIfNull(cache);
+
+        _client = client;
+        _logger = logger;
+        _cache = cache;
+        _applicationSettings = applicationSettings;
+    }
+
+    public async Task<string?> GetName(string externalIdWithPrefix, CancellationToken cancellationToken) =>
+        await _cache.GetOrSetAsync<string?>(
+            GetCacheKey(externalIdWithPrefix),
+            GetNameFactory(externalIdWithPrefix),
+            token: cancellationToken);
+
+    private Func<FusionCacheFactoryExecutionContext<string?>, CancellationToken, Task<string?>> GetNameFactory(
+        string externalIdWithPrefix
+    )
+    {
+        return async (ctx, ct) =>
+        {
+            var name = await GetNameFromRegister(externalIdWithPrefix, ct);
+            if (name is not (null or Constants.FallbackSystemUsername)) return name;
+
+            ctx.Options.SkipMemoryCacheWrite = true;
+            ctx.Options.SkipDistributedCacheWrite = true;
+
+            return name;
+        };
+    }
+
+    public void CacheName(string actorId, string name)
+    {
+        if (PartyIdentifier.TryParse(actorId, out var partyIdentifier))
+        {
+            _cache.Set(GetCacheKey(actorId), FlipNameIfPerson(partyIdentifier, name));
+        }
+    }
+
+    private string GetCacheKey(string externalIdWithPrefix)
+    {
+        // Use a instance member to ensure we use the same value in the factory method
+        _useCorrectPersonNameOrdering = _applicationSettings.CurrentValue.FeatureToggle.UseCorrectPersonNameOrdering;
+        return $"Name{(_useCorrectPersonNameOrdering ? "_v2" : "")}_{externalIdWithPrefix}";
+    }
+
+    private async Task<string?> GetNameFromRegister(string externalIdWithPrefix, CancellationToken cancellationToken)
+    {
+        if (!PartyIdentifier.TryParse(externalIdWithPrefix, out var partyIdentifier))
+        {
+            return null;
+        }
+
+        // We do not have any information about system users, self-identified users or Feide users in the party name registry
+        switch (partyIdentifier)
+        {
+            case AltinnSelfIdentifiedUserIdentifier or IdportenEmailUserIdentifier:
+                return partyIdentifier.Id;
+            case FeideUserIdentifier:
+                return $"Feide User ({partyIdentifier.Id[..6]})";
+            default:
+                // Handle below
+                break;
+        }
+
+        if (!TryGetLookupDto(partyIdentifier, out var nameLookup))
+        {
+            return null;
+        }
+
+        const string apiUrl = "register/api/v1/dialogporten/parties/query";
+        var nameLookupResult = await PerformPartyNameRequest(apiUrl, nameLookup, cancellationToken);
+
+        var name = nameLookupResult.Data.FirstOrDefault()?.DisplayName;
+
+        // TODO! Currently, arbeidsflate expects the name ordering to be "Last First" for Norwegian persons, and does
+        // the flip itself for persons. See https://github.com/Altinn/dialogporten/issues/3171
+        if (name is not null) return FlipNameIfPerson(partyIdentifier, name);
+
+        if (partyIdentifier is not SystemUserIdentifier)
+        {
+            _logger.LogError(
+                "Failed to get name from party name registry for external id {ExternalId}. Response: {@Response}",
+                externalIdWithPrefix,
+                nameLookupResult
+            );
+            return null;
+        }
+
+        // Retry for system users to account for propagation delays in the registry.
+        // Delays responses to GET requests by system users, but avoids returning a 500.
+        int[] retryDelaysMs = [500, 1000, 2000];
+        NameLookupResult? lastRetryResult = null;
+        for (var attempt = 0; attempt < retryDelaysMs.Length; attempt++)
+        {
+            var retryAfter = TimeSpan.FromMilliseconds(retryDelaysMs[attempt]);
+            _logger.LogWarning(
+                "Got null when getting system name. Retrying (attempt {Attempt}/{MaxAttempts}) after {RetryAfter}. ExternalId: {ExternalId}",
+                attempt + 1,
+                retryDelaysMs.Length,
+                retryAfter,
+                externalIdWithPrefix
+            );
+
+            await Task.Delay(retryAfter, cancellationToken);
+            lastRetryResult = await PerformPartyNameRequest(apiUrl, nameLookup, cancellationToken);
+
+            name = lastRetryResult.Data.FirstOrDefault()?.DisplayName;
+            if (name is not null) return name; // We are system user here, no need to FlipNameIfPerson
+        }
+
+        _logger.LogWarning(
+            "Failed to get system name from party name registry for external id {ExternalId}. Response: {@Response}. Retries: {Retries}. Using fallback name.",
+            externalIdWithPrefix,
+            lastRetryResult,
+            retryDelaysMs.Length
+        );
+
+        return Constants.FallbackSystemUsername;
+    }
+
+    private async Task<NameLookupResult> PerformPartyNameRequest(string apiUrl, NameLookup nameLookup, CancellationToken cancellationToken)
+    {
+        return await _client.PostAsJsonEnsuredAsync<NameLookupResult>(
+            apiUrl,
+            nameLookup,
+            serializerOptions: SerializerOptions,
+            cancellationToken: cancellationToken);
+    }
+
+    private string FlipNameIfPerson(IPartyIdentifier partyIdentifier, string name)
+    {
+        if (!_useCorrectPersonNameOrdering && partyIdentifier is NorwegianPersonIdentifier)
+        {
+            // Flip the order of the name parts: "A B C" -> "C A B" / "A B" -> "B A"
+            var parts = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > 1)
+            {
+                name = $"{parts[^1]} {string.Join(" ", parts[..^1])}";
+            }
+        }
+
+        return name;
+    }
+
+    private static bool TryGetLookupDto(IPartyIdentifier partyIdentifier, [NotNullWhen(true)] out NameLookup? nameLookup)
+    {
+
+        nameLookup = partyIdentifier switch
+        {
+            NorwegianPersonIdentifier personIdentifier => new() { Data = [personIdentifier.FullId] },
+            NorwegianOrganizationIdentifier organizationIdentifier => new() { Data = [organizationIdentifier.FullId] },
+            SystemUserIdentifier systemUserIdentifier => new() { Data = [systemUserIdentifier.FullId] },
+            _ => null
+        };
+
+        return nameLookup is not null;
+    }
+
+    private sealed class NameLookup
+    {
+        public List<string> Data { get; set; } = null!;
+    }
+
+    private sealed class NameLookupResult
+    {
+        public List<NameLookupEntry> Data { get; set; } = null!;
+    }
+
+    private sealed class NameLookupEntry
+    {
+        public string? DisplayName { get; set; }
+    }
+}
+
+internal sealed class LocalPartNameRegistryClient : IPartyNameRegistry
+{
+    private readonly Dictionary<string, string> _fakeCache = new();
+    public Task<string?> GetName(string externalIdWithPrefix, CancellationToken cancellationToken)
+    {
+        return _fakeCache.TryGetValue(externalIdWithPrefix, out var cachedName)
+            ? Task.FromResult<string?>(cachedName)
+            : Task.FromResult<string?>("Gunnar Gunnarson");
+    }
+
+    public void CacheName(string actorId, string name)
+    {
+        _fakeCache.Remove(actorId);
+        _fakeCache.Add(actorId, name);
+    }
+}

@@ -1,0 +1,573 @@
+import {
+  type BadgeColor,
+  type BadgeSize,
+  type BadgeVariant,
+  Button,
+  type DialogActionButtonProps,
+  DialogActions,
+  DialogAttachments,
+  DialogBody,
+  type DialogButtonPriority,
+  DialogHeader,
+  DsAlert,
+  DsParagraph,
+  Heading,
+  type SnackbarColor,
+  SnackbarDuration,
+  Timeline,
+  TimelineSegment,
+  TransmissionList,
+  Typography,
+  useSnackbar,
+} from '@altinn/altinn-components';
+import type { ActivityLogSegmentProps } from '@altinn/altinn-components/dist/types/lib/components';
+import { DialogEventType, DialogStatus } from 'bff-types-generated';
+import type { TFunction } from 'i18next';
+import { type ReactElement, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Analytics } from '../../analytics/analytics.ts';
+import { ANALYTICS_EVENTS } from '../../analytics/analyticsEvents.ts';
+import type { DialogByIdDetails } from '../../api/hooks/useDialogById.tsx';
+import type { DialogEventData } from '../../api/hooks/useDialogByIdSubscription.ts';
+import { useErrorLogger } from '../../hooks/useErrorLogger';
+import { useFormat } from '../../i18n/useDateFnsLocale.tsx';
+import { getDueAtProps } from '../../pages/Inbox/dueAt.ts';
+import { getDialogStatus } from '../../pages/Inbox/status.ts';
+import type { TimelineSegmentWithTransmissions } from '../../utils/transmissions.ts';
+import { ActivityLogModal } from '../ActivityLog/ActivityLogModal.tsx';
+import { AdditionalInfoContent } from '../AdditionalInfoContent/AdditionalInfoContent.tsx';
+import { MainContentReference } from '../MainContentReference/MainContentReference.tsx';
+import { SeenByModal } from '../SeenByModal/SeenByModal.tsx';
+import { DialogHelp } from './DialogHelp.tsx';
+import styles from './dialogDetails.module.css';
+
+interface DialogDetailsProps {
+  dialog: DialogByIdDetails | undefined | null;
+  activityModalProps: {
+    isOpen: boolean;
+    setIsOpen: (isOpen: boolean) => void;
+  };
+  seenByLogModalProps: {
+    isOpen: boolean;
+    setIsOpen: (isOpen: boolean) => void;
+  };
+  onAccessInfoClick: () => void;
+  isAuthLevelTooLow?: boolean;
+  isLoading?: boolean;
+  dialogToken?: string;
+  onMessageEvent: (handler: (eventData: DialogEventData, rawEvent: MessageEvent) => void) => void;
+}
+
+/**
+ * Displays detailed information about an inbox item, including title, summary, sender, recipient, attachments, tags, and GUI actions.
+ * This component is intended to be used for presenting a full view of an inbox item, with comprehensive details not shown in the summary view.
+ * It supports rendering both text and React node summarys, and dynamically lists attachments with links.
+ * Dynamically rendered action buttons are implemented through the `GuiActions` component.
+ *
+ * @component
+ * @param {object} props - The properties passed to the component.
+ * @param {DialogByIdDetails} props.dialog - The dialog details containing all the necessary information.
+ * @returns {ReactElement} The InboxItemDetail component.
+ *
+ * @example
+ * <InboxItemDetail
+ *   dialog={{
+ *     title: "Project Update",
+ *     summary: "Here's the latest update on the project...",
+ *     sender: { name: "Alice", icon: <PersonIcon /> },
+ *     recipient: { name: "Bob", icon: <PersonIcon /> },
+ *     attachment: [{ label: "Project Plan", href: "/path/to/document", mime: "application/pdf" }],
+ *     tags: [{ label: "Important", icon: <FlagIcon />, className: "important" }],
+ *     guiActions: [{ label: "Approve", onClick: () => alert('Approved') }]
+ *   }}
+ * />
+ */
+
+export interface DialogActionProps {
+  id: string;
+  title: string;
+  url: string;
+  httpMethod: string;
+  prompt?: string;
+  disabled?: boolean;
+  priority: string;
+  hidden?: boolean;
+}
+
+const dialogActionsMaxItems = 2;
+
+const isNavigationAction = ({ httpMethod, prompt, disabled }: DialogActionProps): boolean =>
+  httpMethod === 'GET' && !prompt && !disabled;
+
+const trackGuiActionClick = ({ id, title, url, httpMethod, prompt }: DialogActionProps): void => {
+  Analytics.trackEvent(ANALYTICS_EVENTS.GUI_ACTION_CLICK, {
+    'action.id': id,
+    'action.title': title,
+    'action.httpMethod': httpMethod,
+    'action.hasPrompt': !!prompt,
+    'action.url': url,
+  });
+};
+
+const trackNavigationSuccess = ({ id, title, httpMethod }: DialogActionProps): void => {
+  Analytics.trackEvent(ANALYTICS_EVENTS.GUI_ACTION_SUCCESS, {
+    'action.id': id,
+    'action.title': title,
+    'action.httpMethod': httpMethod,
+    'action.type': 'external_link',
+  });
+};
+
+interface PerformDialogActionArgs {
+  action: DialogActionProps;
+  dialogToken: string;
+  onRequestSettled: () => void;
+  onNoUpdateExpected: () => void;
+  logError: (error: Error, context?: Record<string, unknown>, errorMessage?: string) => void;
+  openSnackbar: (config: { message: string; color: SnackbarColor; duration: number }) => void;
+  t: TFunction<'translation', undefined>;
+  format: (date: Date | string, formatStr: string) => string;
+}
+
+const performDialogAction = async ({
+  action,
+  dialogToken,
+  onRequestSettled,
+  onNoUpdateExpected,
+  logError,
+  openSnackbar,
+  t,
+  format,
+}: PerformDialogActionArgs): Promise<void> => {
+  const { id, title, url, httpMethod, prompt } = action;
+
+  trackGuiActionClick(action);
+
+  if (prompt && !window.confirm(prompt)) {
+    Analytics.trackEvent(ANALYTICS_EVENTS.GUI_ACTION_CANCELLED, {
+      'action.id': id,
+      'action.title': title,
+      'cancellation.reason': 'user_declined_prompt',
+    });
+    // Nothing was sent, so no dialog update will ever be pushed for this click.
+    onNoUpdateExpected();
+    onRequestSettled();
+    return;
+  }
+
+  if (httpMethod === 'GET') {
+    trackNavigationSuccess(action);
+    onRequestSettled();
+    window.location.href = url;
+    return;
+  }
+
+  try {
+    const response = await Analytics.trackFetchDependency(
+      `DialogAction_${httpMethod}`,
+      fetch(url, {
+        method: httpMethod,
+        headers: {
+          Authorization: `Bearer ${dialogToken}`,
+          Accept: 'application/json',
+        },
+      }),
+    );
+
+    if (!response.ok) {
+      // Special handling for 422 Unprocessable Entity (grace period not satisfied)
+      if (response.status === 422) {
+        try {
+          const errorData = await response.json();
+          const gracePeriodDays = errorData.gracePeriodDays;
+          const deletionAllowedAt = errorData.deletionAllowedAt;
+
+          if (deletionAllowedAt) {
+            const deletionDate = new Date(deletionAllowedAt);
+            const formattedDate = format(deletionDate, 'do MMMM yyyy');
+
+            openSnackbar({
+              message: t('dialog.gui_action.delete_grace_period', {
+                date: formattedDate,
+                days: gracePeriodDays,
+              }),
+              color: 'danger',
+              duration: 10000,
+            });
+
+            Analytics.trackEvent(ANALYTICS_EVENTS.GUI_ACTION_CANCELLED, {
+              'action.id': id,
+              'action.title': title,
+              'cancellation.reason': 'grace_period_not_satisfied',
+              'gracePeriod.days': gracePeriodDays,
+            });
+
+            onNoUpdateExpected();
+            onRequestSettled();
+            return;
+          }
+        } catch (parseError) {
+          // JSON parse failed - fall through to generic error handling
+          logError(
+            parseError as Error,
+            {
+              context: 'DialogDetails.performDialogAction.422.parseError',
+              url,
+              httpMethod,
+            },
+            'Failed to parse 422 error response',
+          );
+        }
+      }
+
+      // Generic error handling for all other errors (including unparseable 422s)
+      let responseBody = '';
+      try {
+        responseBody = await response.text();
+      } catch {}
+
+      openSnackbar({
+        message: t('dialog.gui_action.failed'),
+        color: 'danger',
+        duration: SnackbarDuration.normal,
+      });
+
+      logError(
+        new Error(`HTTP ${response.status}: ${response.statusText}`),
+        {
+          context: 'DialogDetails.performDialogAction.response',
+          url,
+          httpMethod,
+          status: response.status,
+          statusText: response.statusText,
+          responseBody,
+        },
+        `Dialog action failed: ${response.statusText}`,
+      );
+      onNoUpdateExpected();
+    }
+  } catch (error) {
+    logError(
+      error as Error,
+      {
+        context: 'DialogDetails.performDialogAction.fetch',
+        url,
+        httpMethod,
+      },
+      'Error performing dialog action',
+    );
+    onNoUpdateExpected();
+  } finally {
+    onRequestSettled();
+  }
+};
+
+export const DialogDetails = ({
+  dialog,
+  isLoading,
+  isAuthLevelTooLow,
+  activityModalProps,
+  seenByLogModalProps,
+  onAccessInfoClick,
+  dialogToken,
+  onMessageEvent,
+}: DialogDetailsProps): ReactElement => {
+  const { t } = useTranslation();
+  const { logError } = useErrorLogger();
+  const { openSnackbar } = useSnackbar();
+  const [actionIdLoading, setActionIdLoading] = useState<string>('');
+  const [actionIdUpdating, setActionIdUpdating] = useState<string>('');
+  const [showAllTransmissions, setShowAllTransmissions] = useState<boolean>(false);
+  const format = useFormat();
+
+  onMessageEvent((eventData: DialogEventData) => {
+    if (
+      eventData.data?.dialogEvents?.type === DialogEventType.DialogUpdated &&
+      eventData.data.dialogEvents.id === dialog?.id
+    ) {
+      setActionIdUpdating('');
+    }
+  });
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: t is stable from i18next
+  const transmissions: TimelineSegmentWithTransmissions[] = useMemo(() => {
+    if (!dialog?.transmissions) {
+      return [];
+    }
+
+    /* Add content reference to each item in the transmission - ensure they are not eagerly loaded, will only render on expand */
+    return dialog.transmissions.map((transmission) => ({
+      ...transmission,
+      items: transmission.items?.map((item) => {
+        return {
+          ...item,
+          // C: empty-state message | B (contentRef): lazy-load embedded content
+          children: item.isEmpty ? (
+            <Typography>
+              <em>{t('transmission.empty')}</em>
+            </Typography>
+          ) : dialog.contentReferenceForTransmissions[item.id as string] ? (
+            dialogToken && (
+              <MainContentReference
+                id={item.id}
+                content={dialog.contentReferenceForTransmissions[item.id as string]}
+                dialogToken={dialogToken}
+                dialogId={dialog?.id ?? ''}
+              />
+            )
+          ) : null,
+        };
+      }),
+    }));
+  }, [dialog, dialogToken]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: no need with format
+  const activityHistoryItems: ActivityLogSegmentProps[] = useMemo(() => {
+    if (!dialog?.activityHistory) {
+      return [];
+    }
+
+    return dialog.activityHistory.map((dialogHistoryItem) => {
+      return {
+        id: dialogHistoryItem.id,
+        datetime: dialogHistoryItem.date,
+        items: dialogHistoryItem.items.map((item) => ({
+          id: item.id,
+          summary: dialogHistoryItem.type !== 'transmission' ? item.summary : '',
+          datetime: item.datetime,
+          byline: item.datetime ? format(item.datetime, 'do MMMM yyyy HH.mm') : '',
+        })),
+        children:
+          dialogHistoryItem.type === 'transmission' ? (
+            <TransmissionList
+              items={dialogHistoryItem.items.map((item) => {
+                return {
+                  ...item,
+                  // C: empty-state message | B (contentRef): lazy-load embedded content
+                  children: item.isEmpty ? (
+                    <Typography>
+                      <em>{t('transmission.empty')}</em>
+                    </Typography>
+                  ) : dialog.contentReferenceForTransmissions[item.id as string] ? (
+                    dialogToken && (
+                      <MainContentReference
+                        id={item.id}
+                        content={dialog.contentReferenceForTransmissions[item.id as string]}
+                        dialogToken={dialogToken}
+                        dialogId={dialog?.id}
+                      />
+                    )
+                  ) : null,
+                };
+              })}
+            />
+          ) : null,
+      };
+    });
+  }, [dialog, dialogToken]);
+
+  if (isLoading) {
+    return (
+      <>
+        <DialogHeader
+          loading
+          updatedAt={new Date().toISOString()}
+          updatedAtLabel={format(new Date(), 'do MMMM yyyy HH.mm').toString()}
+          dueAt={{
+            datetime: new Date().toISOString(),
+            label: format(new Date(), 'do MMMM yyyy HH.mm').toString(),
+          }}
+          status={getDialogStatus(DialogStatus.NotApplicable, t)}
+          title={'???'}
+        />
+        <DialogBody sender={{ name: 'XXX' }} recipient={{ name: 'YYY' }} loading />
+      </>
+    );
+  }
+
+  if (isAuthLevelTooLow) {
+    return (
+      <DsAlert data-color="danger">
+        <Heading data-size="xs">{t('error.dialog.auth_level_too_low')}</Heading>
+        <DsParagraph>
+          <a href="/api/login?idporten_loa_high=true">{t('error.dialog.auth_level_too_low.link')}</a>
+        </DsParagraph>
+      </DsAlert>
+    );
+  }
+
+  if (!dialog) {
+    return (
+      <Typography>
+        <h1>{t('error.dialog.not_found')}</h1>
+        <p>{t('dialog.error_message.general')}</p>
+      </Typography>
+    );
+  }
+
+  const clockPrefix = t('word.clock_prefix');
+  const formatString = clockPrefix ? `do MMMM yyyy '${clockPrefix}' HH.mm` : `do MMMM yyyy HH.mm`;
+  const numberOfTransmissionGroups = 3;
+  const visibleActionCount = dialog.guiActions.filter((action) => !action.hidden).length;
+  const rendersAsComboButton = visibleActionCount > dialogActionsMaxItems;
+  const dialogActions: DialogActionButtonProps[] = dialog.guiActions.map((action) => {
+    const isBusy = actionIdLoading === action.id || actionIdUpdating === action.id;
+    const commonProps = {
+      id: action.id,
+      label: action.title,
+      priority: action.priority.toLocaleLowerCase() as DialogButtonPriority,
+      hidden: action.hidden,
+    };
+
+    if (!rendersAsComboButton && isNavigationAction(action)) {
+      return {
+        ...commonProps,
+        as: 'a',
+        href: action.url,
+        className: styles.dialogActionButton,
+        onClick: () => {
+          trackGuiActionClick(action);
+          trackNavigationSuccess(action);
+        },
+      };
+    }
+
+    return {
+      ...commonProps,
+      disabled: !!isLoading || !!action.disabled || isBusy,
+      loading: isBusy,
+      onClick: () => {
+        setActionIdLoading(action.id);
+        setActionIdUpdating(action.id);
+        dialogToken &&
+          void performDialogAction({
+            action,
+            dialogToken,
+            onRequestSettled: () => setActionIdLoading(''),
+            onNoUpdateExpected: () => setActionIdUpdating(''),
+            logError,
+            openSnackbar,
+            t,
+            format,
+          });
+      },
+    };
+  });
+
+  const headerBadge =
+    dialog.viewType === 'bin' || dialog.viewType === 'archive'
+      ? {
+          label: t(`status.${dialog.viewType}`),
+          size: 'sm' as BadgeSize,
+          variant: 'subtle' as BadgeVariant,
+          color: 'neutral' as BadgeColor,
+        }
+      : undefined;
+
+  return (
+    <>
+      <DialogHeader
+        updatedAt={dialog.updatedAt}
+        updatedAtLabel={format(dialog.updatedAt, formatString)}
+        dueAt={getDueAtProps(dialog.dueAt, dialog.status, t, (date) => format(date, formatString))}
+        status={getDialogStatus(dialog.status, t)}
+        badge={headerBadge}
+        title={dialog.title}
+        sentCount={dialog.sentCount}
+        receivedCount={dialog.receivedCount}
+        attachmentsCount={dialog.attachments?.length}
+        extendedStatusLabel={dialog.extendedStatusLabel}
+      />
+      <DialogBody
+        sender={dialog.sender}
+        recipient={dialog.receiver}
+        recipientLabel={t('word.to')}
+        seenByLog={dialog.seenByLog && { ...dialog.seenByLog, onClick: () => seenByLogModalProps.setIsOpen(true) }}
+        activityLog={{
+          label: t('dialog.activity_log.title'),
+          onClick: () => activityModalProps.setIsOpen(true),
+        }}
+        accessInfo={{
+          label: t('dialog.access_info.menu_item'),
+          onClick: onAccessInfoClick,
+        }}
+      >
+        <p>{dialog.summary}</p>
+        {dialogToken && (
+          <MainContentReference
+            content={dialog.mainContentReference}
+            dialogToken={dialogToken}
+            id={dialog.id}
+            dialogId={dialog.id}
+          />
+        )}
+        {dialog.attachments.length > 0 && (
+          <DialogAttachments
+            title={t('inbox.heading.attachments', { count: dialog.attachments.length })}
+            items={dialog.attachments}
+          />
+        )}
+        <DialogActions items={dialogActions} maxItems={dialogActionsMaxItems} id="gui-actions" />
+      </DialogBody>
+      {transmissions?.length > 0 && (
+        <Timeline>
+          {transmissions
+            .slice(0, showAllTransmissions ? undefined : numberOfTransmissionGroups)
+            .map(({ items, ...timelineSegmentProps }) => {
+              return (
+                <TimelineSegment {...timelineSegmentProps} key={timelineSegmentProps.id}>
+                  {transmissions?.length > 0 && <TransmissionList items={items} />}
+                </TimelineSegment>
+              );
+            })}
+        </Timeline>
+      )}
+      {dialog.transmissions.length > numberOfTransmissionGroups && !showAllTransmissions && (
+        <Button
+          variant="outline"
+          onClick={() => {
+            Analytics.trackEvent(ANALYTICS_EVENTS.DIALOG_TRANSMISSIONS_EXPAND, {
+              'dialog.id': dialog.id,
+              'transmissions.totalCount': dialog.transmissions.length,
+              'transmissions.visibleCount': numberOfTransmissionGroups,
+            });
+            setShowAllTransmissions(true);
+          }}
+        >
+          {t('dialog.transmission.expandLabel')}
+        </Button>
+      )}
+      {showAllTransmissions && (
+        <Button
+          variant="outline"
+          onClick={() => {
+            Analytics.trackEvent(ANALYTICS_EVENTS.DIALOG_TRANSMISSIONS_COLLAPSE, {
+              'dialog.id': dialog.id,
+              'transmissions.totalCount': dialog.transmissions.length,
+              'transmissions.visibleCount': numberOfTransmissionGroups,
+            });
+            setShowAllTransmissions(false);
+          }}
+        >
+          {t('dialog.transmission.collapseLabel')}
+        </Button>
+      )}
+      {dialog.additionalInfo?.value && (
+        <AdditionalInfoContent mediaType={dialog.additionalInfo.mediaType} value={dialog.additionalInfo.value} />
+      )}
+      <DialogHelp />
+      <ActivityLogModal
+        title={dialog.title}
+        items={activityHistoryItems}
+        isOpen={activityModalProps.isOpen}
+        setIsOpen={activityModalProps.setIsOpen}
+      />
+      <SeenByModal
+        title={dialog.title}
+        items={dialog.seenByLog?.items}
+        isOpen={seenByLogModalProps.isOpen}
+        onClose={() => seenByLogModalProps.setIsOpen(false)}
+      />
+    </>
+  );
+};

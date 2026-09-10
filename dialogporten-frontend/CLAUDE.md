@@ -1,0 +1,145 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+Dialogporten Frontend is a Norwegian government digital communication platform frontend. It's a monorepo using pnpm workspaces with a React SPA frontend, a Fastify BFF (Backend for Frontend) with GraphQL, and supporting packages.
+
+## Build & Development Commands
+
+### Quick Reference
+```bash
+# Install dependencies
+pnpm install
+
+# Type checking
+pnpm turbo typecheck
+
+# Run tests
+pnpm turbo test
+
+# Build for production
+pnpm turbo build
+
+# Code formatting/linting
+pnpm biome:fix              # Fix all files
+pnpm biome:fix-staged       # Fix staged files only
+```
+
+### Local Development with Docker
+```bash
+make dev                    # Start all services in watch mode
+make compose-down           # Stop containers
+```
+
+Services available at:
+- App: https://app.localhost
+- Docs: https://docs.localhost
+- GraphQL IDE: https://app.localhost/api/graphql
+
+### Frontend Package (`packages/frontend`)
+```bash
+pnpm dev                    # Vite dev server
+pnpm test                   # Unit tests (Vitest)
+pnpm test:watch             # Tests in watch mode
+pnpm test:playwright        # E2E tests (main project)
+pnpm test:playwright:heavy  # Heavy multi-step specs (run alone, serially)
+pnpm test:playwright:perf   # Performance specs (run alone, serially)
+pnpm test:accessibility     # Accessibility tests
+pnpm i18n:check             # Check translation completeness
+```
+
+Running a single Playwright test:
+```bash
+pnpm test:playwright -g 'myStory.spec.ts'
+```
+
+### BFF Package (`packages/bff`)
+```bash
+pnpm dev                    # Start with file watching
+pnpm test                   # Unit tests
+pnpm typeorm                # TypeORM CLI
+```
+
+## Architecture
+
+```
+Frontend (React 19/Vite)
+        │
+        │ GraphQL (graphql-request) + SSE subscriptions
+        ▼
+BFF (Fastify/GraphQL)
+        │
+   ┌────┴────┬─────────────┐
+   ▼         ▼             ▼
+PostgreSQL  Redis     Dialogporten API
+(TypeORM)   (Sessions) (Schema Stitched)
+```
+
+**Key architectural patterns:**
+- BFF uses GraphQL schema stitching to combine local schema (Nexus) with external Dialogporten API
+- Authentication via ID-porten OIDC with server-side sessions in Redis
+- React Query for data fetching and caching
+- Real-time updates via Server-Sent Events (SSE)
+- i18next with ICU message format for internationalization
+
+## Key Directories
+
+- `packages/frontend/src/pages/` - Page components (Inbox, DialogDetailsPage, Profile, etc.)
+- `packages/frontend/src/components/` - Reusable React components
+- `packages/frontend/src/api/` - GraphQL queries and API hooks
+- `packages/frontend/tests/` - Playwright E2E and accessibility tests
+- `packages/bff/src/graphql/` - GraphQL schema and types (Nexus)
+- `packages/bff/src/auth/` - OIDC authentication flows
+- `packages/bff/src/migrations/` - TypeORM database migrations
+- `.azure/` - Bicep infrastructure code
+- `.agents/skills/` - Repo-defined agent skills (keep these up to date when relevant)
+
+## Code Conventions
+
+- **Formatting**: Biome (120 char line width, 2 spaces, single quotes JS/double quotes JSX, semicolons always)
+- **Components**: Functional components with hooks, `.tsx` extension, CSS Modules for styling
+- **Console logs**: `noConsoleLog` rule enforced - use the node-logger package instead
+- **GraphQL**: Nexus for type-safe schema definition in BFF
+- **Testing**: Vitest for unit tests, Playwright for E2E, axe-core for accessibility
+
+## Shared Dependency Versions (pnpm catalog)
+
+Versions of dependencies used by 2+ packages are centralized in the `catalog:` section of `pnpm-workspace.yaml`. Each package's `package.json` references these via `"<dep>": "catalog:"`.
+
+When adding or upgrading a dependency:
+- If it's only used in one package, declare the version directly.
+- If it's also used in another package (or about to be), add it to the `catalog:` in `pnpm-workspace.yaml` and reference it as `"catalog:"` from every consumer.
+- To bump a shared version, edit the entry in `pnpm-workspace.yaml` — do not pin individual packages to a different version.
+
+## Agent Skills (`.agents/skills/`)
+
+- **Keep skills in sync when relevant**: If you change behavior/workflows that are described by an existing skill in `.agents/skills/<skill>/SKILL.md`, update that skill file so it matches the new reality.
+- **Only update what’s defined**: Only update skills that already exist in `.agents/skills/` (and/or are listed in `skills-lock.json`). Do not create new skills or new skill folders unless they are already defined in this repo or explicitly requested.
+
+## Mock Data for Testing
+
+Access mock data in browser: `https://app.localhost/?mock=true`
+
+With specific dataset: `https://app.localhost/?mock=true&playwrightId=<folder-name>`
+
+Mock data location: `packages/frontend/src/mocks/data`
+
+## Environment Setup
+
+Requires Node 22+, pnpm, and Docker. Create `.env` in root with:
+```
+OIDC_CLIENT_ID=<value>
+OIDC_CLIENT_SECRET=<value>
+APP_CONFIG_CONNECTION_STRING=<value>
+AUTH_CONTEXT_COOKIE_DOMAIN='localhost'
+PERSON_URN_ENC_KEYS=<base64_key>  # generate with: openssl rand -base64 64
+# ... additional variables as needed
+```
+
+`PERSON_URN_ENC_KEYS` is the AES-SIV key used to encrypt person URNs in BFF GraphQL responses. Comma-separate `current,previous` for rotation. A built-in dev default exists; never use it in deployed environments.
+
+## Diagrams
+
+Create diagrams using https://excalidraw.com/ - save both `.excalidraw` and `.svg` versions in the same directory.

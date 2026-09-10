@@ -1,0 +1,85 @@
+include:
+  - docker-compose-db-redis.yml
+  - docker-compose-cdc.yml
+  - docker-compose-otel.yml
+
+services:
+  dialogporten-webapi-ingress:
+    image: nginx:1.31.4
+    ports:
+      - "7214:80"
+    volumes:
+      - ./nginx-webapi.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - dialogporten-webapi
+    restart: always
+
+  dialogporten-webapi:
+    scale: 1
+    build:
+      context: .
+      dockerfile: src/Digdir.Domain.Dialogporten.WebApi/Dockerfile
+    restart: always
+    depends_on:
+      dialogporten-postgres:
+        condition: service_healthy
+      dialogporten-redis:
+        condition: service_healthy
+      dialogporten-migrations:
+        condition: service_completed_successfully
+    environment:
+      - Infrastructure:Redis:ConnectionString=dialogporten-redis:6379
+      - Infrastructure:DialogDbConnectionString=${DB_CONNECTION_STRING}
+      - Application:Dialogporten:BaseUri=http://localhost:7214
+      - Serilog__WriteTo__0__Name=Console
+      - Serilog__MinimumLevel__Default=Debug
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL}
+      - OTEL_SERVICE_NAME=dialogporten-webapi
+      - OTEL_RESOURCE_ATTRIBUTES=service.instance.id=dialogporten-webapi,service.namespace=${OTEL_NAMESPACE} 
+    volumes:
+      - ./.aspnet/https:/https
+      - ${USER_SECRETS_DIR}:/home/app/.microsoft/usersecrets:ro
+
+  dialogporten-graphql-ingress:
+    image: nginx:1.31.4
+    ports:
+      - "7215:80"
+    volumes:
+      - ./nginx-graphql.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - dialogporten-graphql
+    restart: always
+
+  dialogporten-graphql:
+    scale: 1
+    # todo: remove after the nginx ingress fixed
+    ports:
+      - "7220:8080"
+    build:
+      context: .
+      dockerfile: src/Digdir.Domain.Dialogporten.GraphQL/Dockerfile
+    restart: always
+    depends_on:
+      dialogporten-postgres:
+        condition: service_healthy
+      dialogporten-redis:
+        condition: service_healthy
+      dialogporten-migrations:
+        condition: service_completed_successfully
+    environment:
+      - Infrastructure:Redis:ConnectionString=dialogporten-redis:6379
+      - Infrastructure:DialogDbConnectionString=${DB_CONNECTION_STRING}
+      - Application:Dialogporten:BaseUri=http://localhost:7214
+      - Serilog__WriteTo__0__Name=Console
+      - Serilog__MinimumLevel__Default=Debug
+      - ASPNETCORE_ENVIRONMENT=Development
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_EXPORTER_OTLP_PROTOCOL=${OTEL_EXPORTER_OTLP_PROTOCOL}
+      - OTEL_SERVICE_NAME=dialogporten-graphql
+      - OTEL_RESOURCE_ATTRIBUTES=service.instance.id=dialogporten-graphql,service.namespace=${OTEL_NAMESPACE}
+    volumes:
+      - ./.aspnet/https:/https
+      - ${USER_SECRETS_DIR}:/home/app/.microsoft/usersecrets:ro

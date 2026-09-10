@@ -1,0 +1,217 @@
+fragment SearchDialogFields on SearchDialog {
+  id
+  party
+  org
+  progress
+  guiAttachmentCount
+  status
+  createdAt
+  dueAt
+  contentUpdatedAt
+  isContentSeen
+  serviceResourceType
+  serviceResource
+  hasUnopenedContent
+  seenSinceLastContentUpdate {
+    ...SeenLogFields
+  }
+  fromServiceOwnerTransmissionsCount
+  fromPartyTransmissionsCount
+  content {
+    title {
+      ...DialogContentFields
+    }
+    summary {
+      ...DialogContentFields
+    }
+    senderName {
+      ...DialogContentFields
+    }
+    extendedStatus {
+      ...DialogContentFields
+    }
+  }
+  endUserContext {
+    systemLabels
+  }
+}
+
+fragment DialogByIdFields on Dialog {
+  id
+  dialogToken
+  party
+  org
+  progress
+  serviceResourceType
+  fromServiceOwnerTransmissionsCount
+  fromPartyTransmissionsCount
+  isContentSeen
+  attachments {
+    ...AttachmentFields
+  }
+  activities {
+    ...DialogActivity
+  }
+  guiActions {
+    ...GuiActionFields
+  }
+  seenSinceLastContentUpdate {
+    ...SeenLogFields
+  }
+  transmissions {
+    ...TransmissionFields
+  }
+  status
+  dueAt
+  createdAt
+  contentUpdatedAt
+  endUserContext {
+    systemLabels
+  }
+  content {
+    title {
+      ...DialogContentFields
+    }
+    summary {
+      ...DialogContentFields
+    }
+    senderName {
+      ...DialogContentFields
+    }
+    additionalInfo {
+      ...DialogContentFields
+    }
+    extendedStatus {
+      ...DialogContentFields
+    }
+    mainContentReference {
+      ...DialogContentFields
+    }
+  }
+}
+
+fragment TransmissionFields on Transmission {
+  id
+  isAuthorized
+  createdAt
+  type
+  sender {
+    actorType
+    actorId
+    actorName
+  }
+  relatedTransmissionId
+  content {
+    title {
+      value {
+        value
+        languageCode
+      }
+      mediaType
+    }
+    summary {
+      value {
+        value
+        languageCode
+      }
+      mediaType
+    }
+    contentReference {
+      value {
+        value
+        languageCode
+      }
+      mediaType
+    }
+  }
+  attachments {
+    ...AttachmentFields
+  }
+}
+
+fragment GuiActionFields on GuiAction {
+  id
+  url
+  isAuthorized
+  isDeleteDialogAction
+  action
+  authorizationAttribute
+  priority
+  httpMethod
+  title {
+    languageCode
+    value
+  }
+  prompt {
+    value
+    languageCode
+  }
+}
+
+fragment DialogContentFields on ContentValue {
+  mediaType
+  value {
+    value
+    languageCode
+  }
+}
+
+fragment AttachmentUrlFields on AttachmentUrl {
+  id
+  url
+  consumerType
+  mediaType
+}
+
+fragment AttachmentFields on Attachment {
+  id
+  displayName {
+    value
+    languageCode
+  }
+  expiresAt
+  urls {
+    ...AttachmentUrlFields
+  }
+}
+
+fragment DialogActivity on Activity {
+  id
+  transmissionId
+  performedBy {
+    actorType
+    actorId
+    actorName
+  }
+  description {
+    value
+    languageCode
+  }
+  type
+  createdAt
+}
+
+fragment SeenLogFields on SeenLog {
+  id
+  seenAt
+  seenBy {
+    actorType
+    actorId
+    actorName
+  }
+  isCurrentEndUser
+}
+
+fragment CountableDialogFields on SearchDialog {
+  id
+  org
+  party
+  contentUpdatedAt
+  status
+  endUserContext {
+    systemLabels
+  }
+  seenSinceLastContentUpdate {
+    isCurrentEndUser
+  }
+}

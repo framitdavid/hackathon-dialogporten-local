@@ -1,0 +1,388 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Dapper;
+using Digdir.Domain.Dialogporten.Application;
+using Digdir.Domain.Dialogporten.Application.Externals;
+using Digdir.Domain.Dialogporten.Domain.Parties.Abstractions;
+using Microsoft.Extensions.Options;
+using Npgsql;
+using ZiggyCreatures.Caching.Fusion;
+
+namespace Digdir.Domain.Dialogporten.Infrastructure.Persistence.Repositories;
+
+/// <summary>
+/// Resolves existing <c>party x resource</c> references from dedicated partyresource tables and caches
+/// resource sets per party using FusionCache.
+///
+/// Input parties and resources are expected as full URNs. Internally, parties and resources are handled
+/// in unprefixed form together with a separate short party prefix.
+/// </summary>
+internal sealed class PartyResourceRepository : IPartyResourceReferenceRepository
+{
+    internal const string ReferencedResourcesCacheName = "PartyResourceReferencedResources";
+
+    private const string ResourcePrefix = "urn:altinn:resource:";
+    private const string CacheKeyPrefix = "ps:";
+    private const string ReferencedResourcesCacheKey = "all";
+
+    // OrdinalIgnoreCase across the board: party/resource URNs are ASCII, and the authorization pipeline that
+    // consumes these sets (AuthorizationHelper) compares with OrdinalIgnoreCase, so a single shared comparer
+    // keeps set membership/intersection stable regardless of which set is probed.
+    private static readonly StringComparer Comparer = StringComparer.OrdinalIgnoreCase;
+
+    private readonly NpgsqlDataSource _dataSource;
+    private readonly IOptionsSnapshot<ApplicationSettings> _applicationSettings;
+    private readonly IFusionCache _cache;
+    private readonly IFusionCache _referencedResourcesCache;
+
+    public PartyResourceRepository(
+        NpgsqlDataSource dataSource,
+        IOptionsSnapshot<ApplicationSettings> applicationSettings,
+        IFusionCacheProvider cacheProvider)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(applicationSettings);
+        ArgumentNullException.ThrowIfNull(cacheProvider);
+
+        var cache = cacheProvider.GetCache(nameof(IPartyResourceReferenceRepository));
+        ArgumentNullException.ThrowIfNull(cache);
+        var referencedResourcesCache = cacheProvider.GetCache(ReferencedResourcesCacheName);
+        ArgumentNullException.ThrowIfNull(referencedResourcesCache);
+
+        _dataSource = dataSource;
+        _applicationSettings = applicationSettings;
+        _cache = cache;
+        _referencedResourcesCache = referencedResourcesCache;
+    }
+
+    public async Task<IReadOnlyCollection<string>> GetReferencedResources(CancellationToken cancellationToken) =>
+        await _referencedResourcesCache.GetOrSetAsync<List<string>>(
+            ReferencedResourcesCacheKey,
+            FetchReferencedResources,
+            token: cancellationToken);
+
+    private async Task<List<string>> FetchReferencedResources(CancellationToken cancellationToken)
+    {
+        const string sql =
+            """
+            SELECT r."UnprefixedResourceIdentifier"
+            FROM partyresource."Resource" r
+            ORDER BY r."UnprefixedResourceIdentifier"
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var command = new CommandDefinition(sql, cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<string>(command);
+
+        return rows
+            .Select(x => $"{ResourcePrefix}{x}")
+            .ToList();
+    }
+
+    public async Task<Dictionary<string, HashSet<string>>> GetReferencedResourcesByParty(
+        IReadOnlyCollection<string> parties,
+        IReadOnlyCollection<string> resources,
+        CancellationToken cancellationToken)
+    {
+        if (!TryNormalizeRequest(parties, resources, out var request))
+        {
+            return [];
+        }
+
+        var shouldPopulateCache = ShouldPopulateCache(request.Parties.Count);
+        if (!shouldPopulateCache)
+        {
+            // Large party sets intentionally bypass per-party cache lookups to avoid Redis/cache fanout.
+            var fetchedResourcesByParty = await FetchResourcesByParty(request.Parties, cancellationToken);
+            return BuildResult(
+                request.Parties,
+                request.Resources,
+                fetchedResourcesByParty);
+        }
+
+        var cacheLookup = await LoadCachedResourcesByParty(request.Parties, cancellationToken);
+        await PopulateCacheMisses(cacheLookup, shouldPopulateCache, cancellationToken);
+
+        return BuildResult(
+            request.Parties,
+            request.Resources,
+            cacheLookup.CachedResourcesByParty);
+    }
+
+    public async Task InvalidateCachedReferencesForParty(string party, CancellationToken cancellationToken) =>
+        // This uses the backplane to invalidate the cache across replicas.
+        await _cache.ExpireAsync(GetCacheKey(party), token: cancellationToken);
+
+    private async Task<Dictionary<string, HashSet<string>>> FetchResourcesByParty(
+        List<string> parties,
+        CancellationToken cancellationToken)
+    {
+        var unprefixedParties = parties
+            .Select(ToUnprefixedParty)
+            .Distinct()
+            .ToList();
+
+        if (unprefixedParties.Count == 0)
+        {
+            return [];
+        }
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        // The single-party case is by far the most common; it uses a non-JSON shape with scalar
+        // parameters so the planner gets an accurate cardinality and we avoid jsonb (de)serialization.
+        // Both shapes join the tiny Resource table through a MATERIALIZED CTE, which forces a hash join
+        // instead of a per-row nested loop on PK_Resource (the dominant buffer cost for multi-party sets).
+        var command = unprefixedParties.Count == 1
+            ? BuildSinglePartyCommand(unprefixedParties[0], cancellationToken)
+            : BuildMultiPartyCommand(unprefixedParties, cancellationToken);
+
+        // The query aggregates resources per party (array_agg), so it returns one row per party rather than one
+        // row per (party, resource). This keeps the result row count proportional to the number of parties (not
+        // party-resource pairs, which can be millions for callers authorized to many parties) and lets us build
+        // the party URN once per party instead of once per row.
+        //
+        // The resource array is read directly from the DbDataReader: Dapper's object mapper cannot bind a
+        // Postgres array column (it sees the field type as System.Array), but Npgsql materializes text[] as
+        // string[] via GetFieldValue. Dapper still handles parameter binding via the CommandDefinition.
+        var result = new Dictionary<string, HashSet<string>>(Comparer);
+        await using var reader = await connection.ExecuteReaderAsync(command);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var shortPrefix = reader.GetString(0)[0];
+            var unprefixedPartyIdentifier = reader.GetString(1);
+            var resources = reader.GetFieldValue<string[]>(2);
+            result[ToPartyUrn(shortPrefix, unprefixedPartyIdentifier)] = new HashSet<string>(resources, Comparer);
+        }
+
+        return result;
+    }
+
+    private static CommandDefinition BuildSinglePartyCommand(
+        UnprefixedParty party,
+        CancellationToken cancellationToken)
+    {
+        const string sql =
+            """
+            WITH res AS MATERIALIZED (
+                SELECT "Id", "UnprefixedResourceIdentifier" FROM partyresource."Resource"
+            )
+            SELECT p."ShortPrefix" AS "ShortPrefix"
+                 , p."UnprefixedPartyIdentifier" AS "UnprefixedPartyIdentifier"
+                 , array_agg(r."UnprefixedResourceIdentifier") AS "Resources"
+            FROM partyresource."Party" p
+            JOIN partyresource."PartyResource" pr
+              ON pr."PartyId" = p."Id"
+            JOIN res r
+              ON r."Id" = pr."ResourceId"
+            WHERE p."ShortPrefix" = @ShortPrefix::char(1)
+              AND p."UnprefixedPartyIdentifier" = @UnprefixedPartyIdentifier
+            GROUP BY p."ShortPrefix", p."UnprefixedPartyIdentifier"
+            """;
+
+        return new CommandDefinition(
+            sql,
+            new
+            {
+                ShortPrefix = party.ShortPrefix.ToString(),
+                party.UnprefixedPartyIdentifier
+            },
+            cancellationToken: cancellationToken);
+    }
+
+    private static CommandDefinition BuildMultiPartyCommand(
+        List<UnprefixedParty> parties,
+        CancellationToken cancellationToken)
+    {
+        const string sql =
+            """
+            WITH input_parties AS (
+                SELECT x."ShortPrefix"
+                     , x."UnprefixedPartyIdentifier"
+                FROM jsonb_to_recordset(@Parties::jsonb)
+                    AS x("ShortPrefix" char(1), "UnprefixedPartyIdentifier" text)
+            ),
+            res AS MATERIALIZED (
+                SELECT "Id", "UnprefixedResourceIdentifier" FROM partyresource."Resource"
+            )
+            SELECT p."ShortPrefix" AS "ShortPrefix"
+                 , p."UnprefixedPartyIdentifier" AS "UnprefixedPartyIdentifier"
+                 , array_agg(r."UnprefixedResourceIdentifier") AS "Resources"
+            FROM input_parties ip
+            JOIN partyresource."Party" p
+              ON p."ShortPrefix" = ip."ShortPrefix"
+             AND p."UnprefixedPartyIdentifier" = ip."UnprefixedPartyIdentifier"
+            JOIN partyresource."PartyResource" pr
+              ON pr."PartyId" = p."Id"
+            JOIN res r
+              ON r."Id" = pr."ResourceId"
+            GROUP BY p."ShortPrefix", p."UnprefixedPartyIdentifier"
+            """;
+
+        return new CommandDefinition(
+            sql,
+            new
+            {
+                Parties = JsonSerializer.Serialize(parties)
+            },
+            cancellationToken: cancellationToken);
+    }
+
+    private static bool TryNormalizeRequest(
+        IReadOnlyCollection<string> parties,
+        IReadOnlyCollection<string> resources, [NotNullWhen(true)] out NormalizedRequest? normalizedRequest)
+    {
+        if (parties.Count == 0 || resources.Count == 0)
+        {
+            normalizedRequest = null;
+            return false;
+        }
+
+        var requestedParties = parties
+            .NormalizeParties(Comparer)
+            .ToList();
+
+        if (requestedParties.Count == 0)
+        {
+            normalizedRequest = null;
+            return false;
+        }
+
+        var requestedResources = resources
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(Comparer);
+
+        if (requestedResources.Count == 0)
+        {
+            normalizedRequest = null;
+            return false;
+        }
+
+        normalizedRequest = new NormalizedRequest(requestedParties, requestedResources);
+        return true;
+    }
+
+    private async Task<CacheLookup> LoadCachedResourcesByParty(
+        List<string> requestedParties,
+        CancellationToken cancellationToken)
+    {
+        var cachedResourcesByParty = new Dictionary<string, HashSet<string>>(Comparer);
+        var cacheMisses = new List<string>();
+
+        await foreach (var partyLookupAttempt in Task
+                           .WhenEach(requestedParties.Select(TryGetCache))
+                           .WithCancellation(cancellationToken))
+        {
+            var (party, cache) = await partyLookupAttempt;
+            if (!cache.HasValue)
+            {
+                cacheMisses.Add(party);
+                continue;
+            }
+
+            cachedResourcesByParty[party] = cache.Value.ToHashSet(Comparer);
+        }
+
+        return new CacheLookup(cachedResourcesByParty, cacheMisses);
+
+        async Task<(string Key, MaybeValue<string[]> Value)> TryGetCache(string x)
+        {
+            var value = await _cache.TryGetAsync<string[]>(GetCacheKey(x), token: cancellationToken);
+            return (x, value);
+        }
+    }
+
+    private async Task PopulateCacheMisses(
+        CacheLookup cacheLookup,
+        bool shouldPopulateCache,
+        CancellationToken cancellationToken)
+    {
+        if (cacheLookup.CacheMisses.Count == 0)
+        {
+            return;
+        }
+
+        var fetchedResourcesByParty = await FetchResourcesByParty(cacheLookup.CacheMisses, cancellationToken);
+        var cacheTasks = new List<Task>();
+
+        foreach (var party in cacheLookup.CacheMisses)
+        {
+            var resourceIds = cacheLookup.CachedResourcesByParty[party] =
+                fetchedResourcesByParty.GetValueOrDefault(party) ?? [];
+            if (shouldPopulateCache)
+            {
+                cacheTasks.Add(
+                    _cache.SetAsync(GetCacheKey(party), resourceIds.ToArray(), token: cancellationToken).AsTask());
+            }
+        }
+
+        await Task.WhenAll(cacheTasks);
+    }
+
+    private bool ShouldPopulateCache(int requestedPartiesCount)
+    {
+        var configuredThreshold = _applicationSettings.Value
+            .Limits
+            .PartyResourcePruning
+            .MaxPartiesCachingThreshold;
+
+        return configuredThreshold == 0 || requestedPartiesCount <= configuredThreshold;
+    }
+
+    private static Dictionary<string, HashSet<string>> BuildResult(
+        List<string> requestedParties,
+        HashSet<string> requestedResources,
+        Dictionary<string, HashSet<string>> resourcesByParty)
+    {
+        var result = new Dictionary<string, HashSet<string>>(Comparer);
+
+        foreach (var party in requestedParties)
+        {
+            if (!resourcesByParty.TryGetValue(party, out var resourceIds))
+            {
+                continue;
+            }
+
+            var matchingResources = resourceIds
+                .Select(x => $"{ResourcePrefix}{x}")
+                .Where(requestedResources.Contains)
+                .ToHashSet(Comparer);
+
+            if (matchingResources.Count == 0)
+            {
+                continue;
+            }
+
+            result[party] = matchingResources;
+        }
+
+        return result;
+    }
+
+    private static UnprefixedParty ToUnprefixedParty(string party) =>
+        !PartyIdentifier.TryParse(party.AsSpan(), out var partyIdentifier)
+        || !PartyIdentifier.TryGetShortPrefix(partyIdentifier, out var shortPrefix)
+            ? throw new InvalidOperationException($"Unsupported party URN format: {party}")
+            : new UnprefixedParty(shortPrefix, partyIdentifier.Id);
+
+    private static string ToPartyUrn(char shortPrefix, string unprefixedPartyIdentifier) =>
+        !PartyIdentifier.TryGetPrefixWithSeparator(shortPrefix, out var prefixWithSeparator)
+            ? throw new InvalidOperationException($"Unsupported short prefix '{shortPrefix}'.")
+            : $"{prefixWithSeparator}{unprefixedPartyIdentifier}";
+
+    private static string GetCacheKey(string party)
+    {
+        var hashedParty = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(party)));
+        return $"{CacheKeyPrefix}{hashedParty}";
+    }
+
+    private sealed record NormalizedRequest(List<string> Parties, HashSet<string> Resources);
+
+    private sealed record CacheLookup(
+        Dictionary<string, HashSet<string>> CachedResourcesByParty,
+        List<string> CacheMisses);
+
+    private sealed record UnprefixedParty(char ShortPrefix, string UnprefixedPartyIdentifier);
+
+}

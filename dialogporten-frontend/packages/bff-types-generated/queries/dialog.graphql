@@ -1,0 +1,11 @@
+query getDialogById($id: UUID!) {
+  dialogById(dialogId: $id) {
+    dialog {
+      ...DialogByIdFields
+    }
+    errors {
+      __typename
+      message
+    }
+  }
+}

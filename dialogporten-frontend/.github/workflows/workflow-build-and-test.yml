@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      version:
+        description: "Version to use for build file naming"
+        required: false
+        type: string
+
+permissions:
+    pull-requests: write
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: 'Typechecking'
+    runs-on: self-hosted
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: 'Checking Out Code'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 'Installing Dependencies'
+        uses: ./.github/actions/install
+
+      - name: 'Doing the typecheck'
+        run: pnpm turbo typecheck
+
+  linting:
+    name: 'Linting'
+    runs-on: self-hosted
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: 'Checking Out Code'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 'Installing Dependencies'
+        uses: ./.github/actions/install
+
+      - name: 'Biome'
+        run: pnpm biome ci
+
+  test:
+    name: 'Tests'
+    runs-on: self-hosted
+    steps:
+      - name: 'Checking Out Code'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 'Installing Dependencies'
+        uses: ./.github/actions/install
+
+      - name: 'Running Unit Tests'
+        run: pnpm turbo test
+
+  build:
+    name: 'Builds'
+    runs-on: self-hosted
+    steps:
+      - name: 'Checking Out Code'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 'Installing Dependencies'
+        uses: ./.github/actions/install
+
+      - name: 'Building'
+        run: pnpm turbo build
+        env:
+          BUILD_VERSION: ${{ inputs.version || 'dev' }}
