@@ -155,6 +155,9 @@ step "Starter Dialogporten"
   if (( REBUILD )); then
     LOCALTEST_PID="$LOCALTEST_PID" docker compose build --no-cache dialogporten-graphql dialogporten-webapi >/dev/null 2>&1
   fi
+  # Bygg synlig av samme grunn som for arbeidsflate: .NET-imagene tar flere minutter
+  # første gang, og et stille script ser ut som et hengt script.
+  docker compose build dialogporten-graphql dialogporten-webapi
   LOCALTEST_PID="$LOCALTEST_PID" docker compose up -d dialogporten-graphql dialogporten-webapi dialogporten-webapi-ingress >/dev/null 2>&1
 )
 ok "Containere startet"
@@ -190,14 +193,18 @@ if docker ps -a --format '{{.Names}}' | grep -qx redis; then
   fi
 fi
 
-# --build er nødvendig: uten den gjenbruker compose et eksisterende image i det
-# uendelige. Et bff-image fra et tidligere forsøk kjenner da ikke LOCAL_DEV_PID,
-# og du havner i OIDC-flyten selv om containeren har variabelen. Bygget er nesten
-# gratis når kilden er uendret.
-if ! fe_log=$( cd "$FRONTEND" && docker compose up -d --build 2>&1 ); then
-  printf '%s\n' "$fe_log" | tail -20 | sed 's/^/    /' >&2
-  die "docker compose up feilet i $FRONTEND"
-fi
+# Bygget må kjøres eksplisitt: uten det gjenbruker compose et eksisterende image i
+# det uendelige, og et bff-image fra et tidligere forsøk kjenner ikke LOCAL_DEV_PID
+# — da havner du i OIDC-flyten selv om containeren har variabelen.
+#
+# Output vises. Med varm cache tar det sekunder, men første gang kjører pnpm install
+# og turbo build for bff, frontend og docs, og da står scriptet i flere minutter.
+# Uten fremdrift ser det ut som om det har hengt seg.
+printf '  bygger images — første gang tar noen minutter\n'
+( cd "$FRONTEND" && docker compose build ) || die "docker compose build feilet i $FRONTEND"
+ok "Images bygget"
+
+( cd "$FRONTEND" && docker compose up -d >/dev/null 2>&1 ) || die "docker compose up feilet — kjør den manuelt i $FRONTEND for detaljer"
 ok "Containere startet"
 
 bff_ready() {
