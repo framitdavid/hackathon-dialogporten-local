@@ -172,7 +172,7 @@ wait_for 180 "Dialogporten WebApi" curl -sf -o /dev/null "http://localhost:7214/
 ok "WebApi på :7214"
 
 ACTIVE_PID=$(curl -s -X POST http://localhost:7220/graphql -H 'Content-Type: application/json' \
-  -d '{"query":"{ parties { party } }"}' | sed -n 's/.*identifier-no:\([0-9]*\).*/\1/p')
+  -d '{"query":"{ parties { party } }"}' | sed -n 's/.*person:identifier-no:\([0-9]*\).*/\1/p')
 if [[ "$ACTIVE_PID" == "$LOCALTEST_PID" ]]; then
   ok "Autentisert part: $ACTIVE_PID"
 else
