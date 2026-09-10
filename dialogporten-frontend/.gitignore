@@ -393,3 +393,8 @@ data/homepage/config/proxmox.yaml
 
 # Used by skills.sh
 skills-lock.json
+
+# certs/ må finnes etter klone — start.sh lager den også, men dette hindrer
+# at mappa forsvinner helt fra repoet.
+!certs/
+!certs/.gitkeep
