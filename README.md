@@ -87,14 +87,14 @@ LocalTest :8000 ──► sync-adapter ──► Dialogporten :7214 ──► ar
    instansfil        watcher           dialog                https://app.localhost
 ```
 
-1. `./start.sh`
-2. `node sync-adapter/localtest-sync.mjs --party 01899699552` i eget vindu
-3. Logg inn i LocalTest som Pengelens Partner og start en app
-4. Utkastet dukker opp i innboksen innen sekundet
-5. Klikk det → tilbake i utfyllingen. «Tilbake til innboks» tar deg tilbake til dialogen
+1. `./start.sh` — blir stående med sync-adapteren
+2. Logg inn i LocalTest som Pengelens Partner og start en app
+3. Utkastet dukker opp i innboksen innen sekundet
+4. Klikk det → tilbake i utfyllingen. «Tilbake til innboks» tar deg tilbake til dialogen
 
-**Adapteren må kjøre.** Er den ikke i gang når du starter en app, får instansen aldri
-`dialog.id`, og tilbakelenken faller stille tilbake til LocalTests forside.
+Adapteren må kjøre for at nye instanser skal få `dialog.id`, så `start.sh` blir stående
+med den i forgrunnen. Ctrl+C stopper den, eller `./stop.sh` fra et annet vindu. Med
+`--no-sync` returnerer scriptet i stedet, men da må du starte adapteren selv.
 
 Bytt bruker uten omstart: `https://app.localhost/api/login?pid=17858296439`. Velg samme
 bruker i LocalTest — instansene må eies av den du ser innboksen til.
@@ -104,7 +104,7 @@ bruker i LocalTest — instansene må eies av den du ser innboksen til.
 ```
 ./start.sh --pid <fnr>     kjør som annen testbruker
 ./start.sh --no-open       ikke åpne nettleser
-./start.sh --sync          start adapteren i forgrunnen til slutt
+./start.sh --no-sync       ikke bli stående med adapteren
 ./start.sh --rebuild       bygg Dialogporten-imagene på nytt
 
 ./stop.sh --volumes        slett databasevolumene også

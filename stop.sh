@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --volumes|-v) REMOVE_VOLUMES=1; shift ;;
     --keep-sync) STOP_SYNC=0; shift ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Ukjent flagg: $1" >&2; exit 1 ;;
   esac
 done

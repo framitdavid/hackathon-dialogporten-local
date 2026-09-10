@@ -5,7 +5,7 @@
 #   ./start.sh                      # alt opp, nettleser åpnes
 #   ./start.sh --pid 17858296439    # kjør som en annen LocalTest-testbruker
 #   ./start.sh --no-open            # ikke åpne nettleser
-#   ./start.sh --sync               # start sync-adapteren i forgrunnen til slutt
+#   ./start.sh --no-sync            # ikke bli stående med sync-adapteren
 #   ./start.sh --rebuild            # bygg Dialogporten-imagene på nytt
 #
 # Forutsetter Docker, Node 22+, mkcert og Altinn Studio (for LocalTest).
@@ -23,16 +23,17 @@ SYNC="$ROOT/sync-adapter"
 
 LOCALTEST_PID="${LOCALTEST_PID:-01899699552}"
 OPEN_BROWSER=1
-RUN_SYNC=0
+RUN_SYNC=1
 REBUILD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pid) LOCALTEST_PID="$2"; shift 2 ;;
     --no-open) OPEN_BROWSER=0; shift ;;
-    --sync) RUN_SYNC=1; shift ;;
+    --no-sync) RUN_SYNC=0; shift ;;
+    --sync) shift ;;  # nå standard, beholdt for vane
     --rebuild) REBUILD=1; shift ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Ukjent flagg: $1" >&2; exit 1 ;;
   esac
 done
@@ -224,13 +225,18 @@ else
   warn "  docker exec bff sh -c 'echo \$LOCAL_DEV_PID'"
 fi
 
-step "Synker LocalTest-instanser"
+INSTANCE_DIR="$HOME/Library/Application Support/altinn-studio/data/AltinnPlatformLocal/documentdb/instances"
 
-if [[ -d "$HOME/Library/Application Support/altinn-studio/data/AltinnPlatformLocal/documentdb/instances" ]]; then
+# Watcheren synker alt ved oppstart, så en egen --once-runde her ville bare gjort
+# jobben to ganger. Den kjøres derfor kun når vi ikke blir stående med watcheren.
+if [[ ! -d "$INSTANCE_DIR" ]]; then
+  step "Synker LocalTest-instanser"
+  warn "Fant ikke LocalTest-lagringen — hopper over sync. Kjører Altinn Studio?"
+  RUN_SYNC=0
+elif (( ! RUN_SYNC )); then
+  step "Synker LocalTest-instanser"
   node "$SYNC/localtest-sync.mjs" --once --party "$LOCALTEST_PID" 2>&1 \
     | grep -vE '^(Dialogporten|LocalTest|Partsfilter) ' || true
-else
-  warn "Fant ikke LocalTest-lagringen — hopper over sync. Kjører Altinn Studio?"
 fi
 
 # ---------------------------------------------------------------------- ferdig
@@ -243,7 +249,6 @@ cat <<EOF
   Dialogporten http://localhost:7214/swagger
 
   Testbruker   $LOCALTEST_PID
-  Sync (watch) node sync-adapter/localtest-sync.mjs --party $LOCALTEST_PID
 EOF
 
 if (( OPEN_BROWSER )); then
@@ -252,6 +257,12 @@ if (( OPEN_BROWSER )); then
 fi
 
 if (( RUN_SYNC )); then
-  step "Sync-adapter (Ctrl+C for å avslutte)"
+  # Watcheren må stå på for at nye instanser skal få dialog.id — uten den faller
+  # «tilbake til innboks» stille tilbake til LocalTests forside. Derfor standard.
+  # exec erstatter skallet, så EXIT-fellen fyrer ikke på et vanlig Ctrl+C.
+  step "Sync-adapter kjører — Ctrl+C for å avslutte"
   exec node "$SYNC/localtest-sync.mjs" --party "$LOCALTEST_PID"
 fi
+
+warn "Sync-adapteren kjører ikke (--no-sync). Nye instanser får ikke dialog.id."
+echo "  Start den med: node sync-adapter/localtest-sync.mjs --party $LOCALTEST_PID"
