@@ -6,7 +6,7 @@
 #   ./start.sh --pid 17858296439    # kjør som en annen LocalTest-testbruker
 #   ./start.sh --no-open            # ikke åpne nettleser
 #   ./start.sh --no-sync            # ikke bli stående med sync-adapteren
-#   ./start.sh --rebuild            # bygg Dialogporten-imagene på nytt
+#   ./start.sh --rebuild            # bygg Dialogporten-imagene helt på nytt
 #
 # Forutsetter Docker, Node 22+, mkcert og Altinn Studio (for LocalTest).
 #
@@ -153,7 +153,7 @@ step "Starter Dialogporten"
   [[ -f .env ]] || cp "$ROOT/dialogporten-env.template" .env
   LOCALTEST_PID="$LOCALTEST_PID" docker compose -f docker-compose-db-redis.yml up -d >/dev/null 2>&1
   if (( REBUILD )); then
-    LOCALTEST_PID="$LOCALTEST_PID" docker compose build dialogporten-graphql dialogporten-webapi >/dev/null 2>&1
+    LOCALTEST_PID="$LOCALTEST_PID" docker compose build --no-cache dialogporten-graphql dialogporten-webapi >/dev/null 2>&1
   fi
   LOCALTEST_PID="$LOCALTEST_PID" docker compose up -d dialogporten-graphql dialogporten-webapi dialogporten-webapi-ingress >/dev/null 2>&1
 )
@@ -190,7 +190,14 @@ if docker ps -a --format '{{.Names}}' | grep -qx redis; then
   fi
 fi
 
-( cd "$FRONTEND" && docker compose up -d >/dev/null 2>&1 ) || die "docker compose up feilet — kjør den manuelt i $FRONTEND for detaljer"
+# --build er nødvendig: uten den gjenbruker compose et eksisterende image i det
+# uendelige. Et bff-image fra et tidligere forsøk kjenner da ikke LOCAL_DEV_PID,
+# og du havner i OIDC-flyten selv om containeren har variabelen. Bygget er nesten
+# gratis når kilden er uendret.
+if ! fe_log=$( cd "$FRONTEND" && docker compose up -d --build 2>&1 ); then
+  printf '%s\n' "$fe_log" | tail -20 | sed 's/^/    /' >&2
+  die "docker compose up feilet i $FRONTEND"
+fi
 ok "Containere startet"
 
 bff_ready() {
@@ -212,10 +219,14 @@ step "Innlogging"
 # sesjonen direkte og setter cookien server-side i stedet for å sende brukeren videre
 # til en autorisasjonsserver som ikke finnes. En utløpt eller slettet sesjon leger seg
 # dermed selv ved neste kall — Redis-sesjonene forsvinner hver gang stacken rives ned.
+# Leser Location-headeren direkte. %{redirect_url} kan ikke brukes: eldre curl lar
+# den stå tom ved relativ redirect, og da ville sjekken meldt feil selv om
+# innloggingen fungerer. Lokal innlogging sender til "/", OIDC-flyten til /authorize.
 login_ok() {
-  local target
-  target=$(curl -s -o /dev/null -w '%{redirect_url}' "${CURL_CA[@]}" https://app.localhost/api/login || echo "")
-  [[ "$target" == "https://app.localhost/" || "$target" == "/" ]]
+  local location
+  location=$(curl -s -D - -o /dev/null "${CURL_CA[@]}" https://app.localhost/api/login 2>/dev/null \
+    | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')
+  [[ -n "$location" && "$location" != *"/authorize"* ]]
 }
 
 if wait_for 60 "innlogging" login_ok; then
