@@ -201,11 +201,18 @@ fi
 # Output vises. Med varm cache tar det sekunder, men første gang kjører pnpm install
 # og turbo build for bff, frontend og docs, og da står scriptet i flere minutter.
 # Uten fremdrift ser det ut som om det har hengt seg.
+# Bare tjenestene dialogflyten trenger. docs er Starlight-dokumentasjonen på
+# docs.localhost og har ingenting med innboksen å gjøre — å bygge den koster et helt
+# ekstra pnpm install. homepage, pgadmin4 og redisinsight er utviklerbekvemmeligheter.
+# Start dem ved behov med: docker compose up -d docs pgadmin4 redisinsight
+FE_SERVICES=(reverse-proxy oidc-static redis db bff bff-migration frontend)
+
 printf '  bygger images — første gang tar noen minutter\n'
-( cd "$FRONTEND" && docker compose build ) || die "docker compose build feilet i $FRONTEND"
+( cd "$FRONTEND" && docker compose build "${FE_SERVICES[@]}" ) || die "docker compose build feilet i $FRONTEND"
 ok "Images bygget"
 
-( cd "$FRONTEND" && docker compose up -d >/dev/null 2>&1 ) || die "docker compose up feilet — kjør den manuelt i $FRONTEND for detaljer"
+( cd "$FRONTEND" && docker compose up -d "${FE_SERVICES[@]}" >/dev/null 2>&1 ) \
+  || die "docker compose up feilet — kjør den manuelt i $FRONTEND for detaljer"
 ok "Containere startet"
 
 bff_ready() {
