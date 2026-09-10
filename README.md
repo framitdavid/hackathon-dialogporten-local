@@ -1,14 +1,23 @@
 # Dialogporten lokalt
 
-Kjører Dialogporten og arbeidsflate (Dialogporten frontend) helt lokalt, koblet mot
-Altinn Studio LocalTest. Du starter en app i LocalTest, og instansen dukker opp som
-utkast i innboksen med en lenke rett tilbake til utfyllingen.
+Kjør Dialogporten og arbeidsflate (Dialogporten frontend) på egen maskin, koblet mot
+Altinn Studio LocalTest. Du starter et skjema i LocalTest, og instansen dukker opp som
+utkast i innboksen — med en lenke rett tilbake til utfyllingen.
 
 ```bash
-./start.sh
+./start.sh     # alt opp, nettleser åpnes
+./stop.sh      # alt ned igjen
 ```
 
-Det er alt. Nettleseren åpnes ferdig innlogget.
+## Hva dette er til for
+
+Å se og teste **hele flyten mellom app og innboks** uten å deploye noe eller ha tilgang
+til testmiljøene: at en dialog opprettes med riktig innhold og status, at den havner i
+riktig innboks, at knappene virker begge veier, og hvordan endringer i arbeidsflate eller
+Dialogporten slår ut i praksis.
+
+Det er ikke et testmiljø for Altinn-plattformen som helhet, og ikke et sted å verifisere
+autorisasjon, tilganger eller varsling — se tabellen under.
 
 ## Forutsetninger
 
@@ -16,31 +25,48 @@ Det er alt. Nettleseren åpnes ferdig innlogget.
 |---|---|
 | Docker | OrbStack eller Docker Desktop |
 | Node | 22 eller nyere |
-| mkcert | `brew install mkcert nss && mkcert -install` |
-| Altinn Studio | For LocalTest — kun nødvendig hvis du vil se appinstanser |
+| mkcert | `brew install mkcert nss && sudo mkcert -install` |
+| Altinn Studio | For LocalTest — kun nødvendig for å lage appinstanser |
 
-`mkcert -install` krever sudo og må kjøres én gang manuelt. Uten den får du en
-sertifikatadvarsel i nettleseren, men alt annet virker.
+`sudo mkcert -install` må kjøres én gang manuelt. Uten den får du sertifikatadvarsel i
+nettleseren, men alt annet virker.
 
-## Hva som kjører
+## Ekte kontra mocket
 
-```
-LocalTest (Altinn Studio)          :8000
-        │  instansfiler
-        ▼
-sync-adapter/localtest-sync.mjs    watcher
-        │  POST /api/v1/serviceowner/dialogs
-        ▼
-Dialogporten                       :7214 API, :7220 GraphQL
-        │
-        ▼
-arbeidsflate BFF + frontend        https://app.localhost
-```
+**Ekte produksjonskode** — de virkelige tjenestene, ikke attrapper:
+
+| | |
+|---|---|
+| Dialogporten | Ekte backend, database, GraphQL og service owner-API |
+| Arbeidsflate | Ekte frontend og BFF |
+| Datamodellen | Dialoger, statuser, systemetiketter, transmisjoner, GUI-actions |
+| Validering | Mod-11 på fnr og orgnr, UUIDv7, HTTPS-krav på lenker |
+| Kryptering | Person-URN-er krypteres i BFF-svar, som i produksjon |
+| LocalTest | Altinns egen lokale plattformemulator |
+
+**Mocket eller erstattet** — her oppfører oppsettet seg ikke som produksjon:
+
+| Hva | Lokalt | Konsekvens |
+|---|---|---|
+| ID-porten | `/api/login` lager sesjonen direkte | Ingen ekte pålogging, ingen sikkerhetsnivå |
+| Autorisasjon | `UseLocalDevelopmentAltinnAuthorization` | Du er alltid autorisert, og ser kun deg selv pluss én fast underenhet |
+| Tilgangsstyring | `DisableAuth` på API-et | Service owner-API-et er helt åpent |
+| Ressursregister | `UseLocalDevelopmentResourceRegister` | Alle `urn:altinn:resource:*` godtas, metadata dikteres opp |
+| Navneoppslag | `UseLocalDevelopmentNameRegister` | Parter heter `Local Party (<fnr>)`, ikke sitt ekte navn |
+| Altinn-plattform | `PLATFORM_BASEURL` peker på død port | Profil, favoritter og varslingsadresser er tomme |
+| Maskinporten | Ikke konfigurert | Brukernavn-oppslag og varslinger virker ikke |
+| Feature flags | Azure App Configuration ikke satt | Innebygde standardverdier brukes |
+| Organisasjonslogoer | `altinncdn.no` nås ikke | Avsendere vises uten logo |
+| App → Dialogporten | Vår `sync-adapter/` | I produksjon gjør Dialogporten Adapter denne jobben |
+
+Det siste er verdt å merke seg: **sync-adapteren finnes ikke i produksjon**. Der oppretter
+apper dialoger gjennom Dialogporten Adapter. Vår adapter leser instansfiler fra LocalTest
+og speiler dem, så flyten kan testes uten den delen av plattformen.
 
 ## Testbrukere
 
-Dialogporten validerer fødselsnummer med mod-11. Bare tre av LocalTest sine
-personbrukere består:
+Dialogporten validerer fødselsnummer med mod-11. Bare tre av LocalTest sine personbrukere
+består:
 
 | Party | Fødselsnummer | Navn | LocalTest UserId |
 |---|---|---|---|
@@ -48,46 +74,58 @@ personbrukere består:
 | 510002 | `17858296439` | Gjentagende Forelder | 1002 |
 | 510003 | `08829698278` | Rik Forelder | 1003 |
 
-Sophie Salt, Ola Nordmann, Kari Nordvik og MultiParty Prompt har fødselsnummer som
-**ikke** består kontrollsifferet og blir avvist. Adapteren hopper over dem og sier ifra.
+Sophie Salt, Ola Nordmann, Kari Nordvik og MultiParty Prompt avvises. Adapteren hopper
+over instansene deres og sier ifra i loggen.
 
-Standard er Pengelens Partner. Bytt uten å restarte noe:
-
-```
-https://app.localhost/api/login?pid=17858296439
-```
-
-Dialogporten leser pid-en rett av bearer-tokenet BFF sender, så hele stacken følger
-etter umiddelbart. `./start.sh --pid <fnr>` setter startverdien i `.env`.
-
-Husk å velge samme bruker i LocalTest — instansene må eies av den du ser innboksen til.
+Organisasjoner synkes, men blir usynlige — autorisasjonsmocken gir deg bare deg selv og
+én fast underenhet.
 
 ## Flyten
 
-1. `./start.sh`
-2. Start sync-adapteren i eget vindu: `node sync-adapter/localtest-sync.mjs --party 01899699552`
-3. Logg inn i LocalTest som Pengelens Partner og start en app
-4. Utkastet dukker opp i `https://app.localhost` innen sekundet
-5. Klikk det → du er tilbake i utfyllingen
+```
+LocalTest :8000 ──► sync-adapter ──► Dialogporten :7214 ──► arbeidsflate
+   instansfil        watcher           dialog                https://app.localhost
+```
 
-## Flagg
+1. `./start.sh`
+2. `node sync-adapter/localtest-sync.mjs --party 01899699552` i eget vindu
+3. Logg inn i LocalTest som Pengelens Partner og start en app
+4. Utkastet dukker opp i innboksen innen sekundet
+5. Klikk det → tilbake i utfyllingen. «Tilbake til innboks» tar deg tilbake til dialogen
+
+**Adapteren må kjøre.** Er den ikke i gang når du starter en app, får instansen aldri
+`dialog.id`, og tilbakelenken faller stille tilbake til LocalTests forside.
+
+Bytt bruker uten omstart: `https://app.localhost/api/login?pid=17858296439`. Velg samme
+bruker i LocalTest — instansene må eies av den du ser innboksen til.
+
+## Kommandoer
 
 ```
 ./start.sh --pid <fnr>     kjør som annen testbruker
 ./start.sh --no-open       ikke åpne nettleser
 ./start.sh --sync          start adapteren i forgrunnen til slutt
 ./start.sh --rebuild       bygg Dialogporten-imagene på nytt
+
+./stop.sh --volumes        slett databasevolumene også
+./stop.sh --keep-sync      la adapteren stå
 ```
 
-Sync-adapteren: `--once`, `--dry-run`, `--verbose`, `--party <id>`.
-Miljøvariabler: `DIALOGPORTEN_API`, `LOCALTEST_BASE`, `LOCALTEST_STORAGE`.
+Adapteren: `--once`, `--dry-run`, `--verbose`, `--party <id>`.
+Miljø: `DIALOGPORTEN_API`, `LOCALTEST_BASE`, `LOCALTEST_STORAGE`.
+
+| | |
+|---|---|
+| Innboks | https://app.localhost |
+| GraphiQL | https://app.localhost/api/graphiql |
+| Dialogporten | http://localhost:7214/swagger |
+| LocalTest | http://local.altinn.cloud:8000 |
 
 ## Tilbake til innboks fra appen
 
-Klikker du «tilbake til innboks» i en app, havner du i innboksen til den testbrukeren du
-valgte som utfyller — på riktig dialog. Det krever to ting utenfor dette repoet.
+Krever to ting utenfor dette repoet.
 
-**1. Appen må konfigureres.** I appens `App/appsettings.json`:
+**Appen konfigureres** i `App/appsettings.json`, og må restartes etterpå:
 
 ```json
 "PlatformFrontendSettings": {
@@ -96,81 +134,56 @@ valgte som utfyller — på riktig dialog. Det krever to ting utenfor dette repo
 }
 ```
 
-`{pid}` fylles med den valgte partens fødselsnummer, `{dialogId}` med dialogen
-sync-adapteren opprettet. `/api/login` logger deg inn som den brukeren og sender deg
-videre til dialogen.
+`{pid}` fylles med den valgte partens fødselsnummer, `{dialogId}` med dialogen adapteren
+opprettet.
 
-**2. App-frontend må kjøres lokalt.** CDN-versjonen har ikke endringene. I
-`altinn-studio/src/App/frontend`:
+**App-frontend kjøres lokalt** — CDN-versjonen mangler endringene:
 
 ```bash
-yarn start     # vite på :8080, som LocalTest allerede ruter til
+cd altinn-studio/src/App/frontend && yarn start    # vite på :8080
 ```
-
-Endringen i `src/utils/urls/urlHelper.ts` gjør at lokale verter følger konfigurerte
-URL-er — men bare når URL-en selv peker lokalt. Konfigurerer du en URL mot tt02 eller
-yt01, ignoreres den fortsatt, slik oppstrøms har bestemt.
-
-**Sync-adapteren må kjøre.** Den skriver `dialog.id` inn i instansens `dataValues`, som
-er der app-frontend henter dialog-ID-en fra. Er ikke adapteren i gang når du starter en
-app, blir instansen aldri tagget, og lenken faller stille tilbake til LocalTests forside.
 
 ## Endringer mot oppstrøms
 
-`dialogporten/` og `dialogporten-frontend/` er kopier av Altinn sine repoer med
-lokale tilpasninger. De sporer ikke oppstrøms.
+`dialogporten/` og `dialogporten-frontend/` er kopier av Altinn sine repoer. De sporer
+ikke oppstrøms.
 
 **dialogporten**
 
 | Fil | Endring |
 |---|---|
-| `LocalDevelopmentUser.cs` (×2) | Løser pid per request: `pid`-claimet i bearer-tokenet, ellers `LocalDevelopment:Pid`, ellers innebygd standard. Gjør brukerbytte mulig uten omstart |
-| `LocalDevelopmentAltinnAuthorization.cs` | Underenhetens orgnr `123456789` → `123456785`. Det opprinnelige består ikke mod-11, og arbeidsflate sender alle underenheter med i hvert dialogsøk — én ugyldig part gjør at `searchDialogs` returnerer `null`, altså tom innboks uten feilmelding |
-| `FluentValidationStringExtensions.cs` | Godtar http for loopback og lokale verter, gated på `ASPNETCORE_ENVIRONMENT=Development`. LocalTest serverer apper over http og bygger redirect-URL-er fra Host-headeren, så den kan ikke stå bak en TLS-proxy |
+| `LocalDevelopmentUser.cs` (×2) | Løser pid per request fra bearer-tokenet, ellers `LocalDevelopment:Pid`. Gjør brukerbytte mulig uten omstart |
+| `LocalDevelopmentAltinnAuthorization.cs` | Orgnr `123456789` → `123456785`, som bestod ikke mod-11 og gjorde hele innboksen tom. Deterministisk `PartyUuid` og pid i partsnavnet |
+| `FluentValidationStringExtensions.cs` | Godtar http for lokale verter, gated på `ASPNETCORE_ENVIRONMENT=Development` |
 | `docker-compose.override.yml` | Setter `LocalDevelopment__Pid` |
 
 **dialogporten-frontend**
 
 | Fil | Endring |
 |---|---|
-| `auth/oidc.ts` + `config.ts` | `/api/login` lager sesjonen direkte når `LOCAL_DEV_PID` er satt, i stedet for å redirecte til ID-porten. `?pid=<fnr>` bytter bruker |
-| `compose.yml` | `oidc-static`-tjeneste, `extra_hosts` på bff, cert-mount, `NODE_EXTRA_CA_CERTS`, `LOCAL_DEV_PID` |
-| `oidc-static/` | Statisk OIDC-discovery som BFF krever ved oppstart |
+| `auth/oidc.ts`, `config.ts` | `/api/login` lager sesjonen lokalt når `LOCAL_DEV_PID` er satt. `?pid=` bytter bruker, `?goTo=` styrer landing |
+| `compose.yml` | `oidc-static`-tjeneste, `extra_hosts`, cert-mount, `NODE_EXTRA_CA_CERTS` |
+| `oidc-static/` | Statisk OIDC-discovery, som BFF krever ved oppstart |
 
-`FluentValidationStringExtensions.cs`- og `oidc.ts`-endringene er lokale bekvemmeligheter og
-skal **ikke** merges oppstrøms.
+**altinn-studio**, utenfor dette repoet: `src/App/frontend/src/utils/urls/urlHelper.ts`
+lar lokale verter følge konfigurerte arbeidsflate-URL-er — men bare når URL-en selv peker
+lokalt, så oppstrøms-regelen om aldri å sende en lokal bruker til et deployet miljø består.
 
-## Hvordan innloggingen fungerer
-
-Det finnes ingen ID-porten lokalt, og vi later heller ikke som. BFF-en startes med
-`LOCAL_DEV_PID`, og da lager `/api/login` sesjonen direkte og setter cookien server-side
-i stedet for å sende deg til en autorisasjonsserver som ikke finnes.
-
-Det betyr at en manglende eller utløpt sesjon leger seg selv: du blir bare logget inn på
-nytt. Det er verdt å vite at Redis-containeren ikke har noe volum, så alle sesjoner
-forsvinner hver gang stacken rives ned.
-
-BFF-en henter fortsatt `.well-known/openid-configuration` ved oppstart og nekter å starte
-uten, så `oidc-static` serverer et statisk dokument. Endepunktene i det blir aldri kalt.
+Endringene i `FluentValidationStringExtensions.cs` og `oidc.ts` er lokale bekvemmeligheter
+og skal **ikke** merges oppstrøms.
 
 ## Feilsøking
 
 | Symptom | Årsak |
 |---|---|
-| Tom innboks | `LOCALTEST_PID` matcher ikke brukeren du logget inn som i LocalTest |
+| Tom innboks | Brukeren i LocalTest matcher ikke den du er logget inn som |
 | Adapteren sier «hoppet over» | Testbrukerens fnr består ikke mod-11 |
+| Tilbakelenken mangler dialog | Adapteren kjørte ikke da instansen ble laget |
+| Havner på en OIDC-side | `LOCAL_DEV_PID` nådde ikke containeren: `docker compose up -d --force-recreate bff` |
 | BFF crash-looper | `docker logs bff` — som regel at `oidc-static` ikke svarer |
-| `docker compose up` klager på navnet `redis` | Altinn Studio designer holder navnet: `docker rm -f redis` (volumet beholdes) |
+| Konflikt på navnet `redis` | Altinn Studio designer holder det: `docker rm -f redis` (volumet beholdes) |
 | Utkast vises ikke etter endring | Dialoglisten caches i 10 minutter — hard refresh |
 | Sertifikatadvarsel | `sudo mkcert -install` |
 
-## Rydde opp
-
-```bash
-./stop.sh              # stopper sync-adapteren og alle containere
-./stop.sh --volumes    # og sletter databasevolumene
-./stop.sh --keep-sync  # la adapteren stå
-```
-
-Adapteren stoppes først, slik at `fs.watch` slipper taket på instanskatalogen.
-LocalTest og Altinn Studio røres ikke.
+Dialogportens database er flyktig — den har ikke noe volum, så alle dialoger synkes på
+nytt ved hver oppstart.
