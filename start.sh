@@ -10,11 +10,19 @@
 #
 # Forutsetter Docker, Node 22+, mkcert og Altinn Studio (for LocalTest).
 #
-set -euo pipefail
+# -E gjør at ERR-fellen under også gjelder inne i subshells — Dialogporten-steget
+# kjører i en, og uten dette ville en feil der ikke blitt fanget.
+set -Eeuo pipefail
 
 # set -e avslutter uten et ord hvis en kommando feiler. Denne fellen sørger for at
 # scriptet alltid sier hvor det stoppet — en stille død er nesten umulig å feilsøke.
-trap 'code=$?; if (( code )); then printf "\n\033[31m✗ Avbrutt på linje %s (exit %s)\033[0m\n" "$LINENO" "$code" >&2; fi' EXIT
+#
+# Linjenummeret må fanges i en ERR-felle: $LINENO inne i EXIT-fellen er fellens egen
+# linje, ikke den som feilet, så den pekte alltid på feil sted. `die` avslutter med
+# exit (ikke ERR) og har allerede skrevet sin egen forklaring, derfor "?" der.
+FAIL_LINE=""
+trap 'FAIL_LINE=$LINENO' ERR
+trap 'code=$?; if (( code )); then printf "\n\033[31m✗ Avbrutt på linje %s (exit %s)\033[0m\n" "${FAIL_LINE:-?}" "$code" >&2; fi' EXIT
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND="$ROOT/dialogporten-frontend"
@@ -145,6 +153,70 @@ fi
 
 CURL_CA=(--cacert "$FRONTEND/certs/rootCA.pem")
 
+# --------------------------------------------------- dialogporten-hemmeligheter
+
+step "Dialogporten-signeringsnøkler"
+
+# Dialogporten signerer dialog-tokens med Ed25519, og nøklene ligger ikke i repoet:
+# appsettings.Development.json har "TODO: Add to local secrets" der de skal være. Den
+# strengen er ikke base64, så Base64Url.Decode kaster FormatException på *hvert* kall
+# mot GraphQL — containeren står "Up", men :7220 svarer aldri, og scriptet stod og
+# ventet i 300 sekunder på noe som aldri kom.
+#
+# Begge tjenestene monterer ${USER_SECRETS_DIR} og arver samme UserSecretsId fra
+# dialogporten/Directory.Build.props, så én secrets.json dekker webapi og graphql.
+# Nøklene er kun til lokal signering, genereres per maskin og committes aldri.
+DP_SECRETS_ID=$(sed -n 's|.*<UserSecretsId>\(.*\)</UserSecretsId>.*|\1|p' \
+  "$DIALOGPORTEN/Directory.Build.props" | head -1)
+[[ -n "$DP_SECRETS_ID" ]] || die "Fant ingen UserSecretsId i $DIALOGPORTEN/Directory.Build.props"
+
+DP_SECRETS_FILE="$HOME/.microsoft/usersecrets/$DP_SECRETS_ID/secrets.json"
+mkdir -p "$(dirname "$DP_SECRETS_FILE")"
+
+# Skriver flate "A:B:C"-nøkler — samme format som `dotnet user-secrets set`. Leser og
+# skriver tilbake hele fila, så eventuelle Maskinporten-/Altinn-hemmeligheter som
+# ligger der fra før beholdes.
+secrets_result=$(node - "$DP_SECRETS_FILE" <<'NODE'
+// CommonJS med vilje: `node -` leser stdin som CJS, så `import` ville kastet
+// SyntaxError her.
+const fs = require('node:fs');
+const { generateKeyPairSync } = require('node:crypto');
+
+const file = process.argv[2];
+const prefix = 'Application:Dialogporten:Ed25519KeyPairs';
+
+let secrets = {};
+try { secrets = JSON.parse(fs.readFileSync(file, 'utf8') || '{}'); } catch {}
+
+// Placeholderen fra appsettings.Development.json regnes som manglende — den er
+// nettopp verdien som får tjenestene til å kaste.
+const missing = ['Primary', 'Secondary'].filter((slot) => {
+  const pub = secrets[`${prefix}:${slot}:PublicComponent`];
+  return !pub || pub.startsWith('TODO');
+});
+
+if (!missing.length) { console.log('finnes'); process.exit(0); }
+
+for (const slot of missing) {
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  // JWK-eksport gir komponentene base64url-kodet uten padding, altså presis det
+  // formatet Base64Url.Decode i Dialogporten forventer.
+  secrets[`${prefix}:${slot}:Kid`] = `local-${slot.toLowerCase()}`;
+  secrets[`${prefix}:${slot}:PrivateComponent`] = privateKey.export({ format: 'jwk' }).d;
+  secrets[`${prefix}:${slot}:PublicComponent`] = publicKey.export({ format: 'jwk' }).x;
+}
+
+fs.writeFileSync(file, JSON.stringify(secrets, null, 2) + '\n', { mode: 0o600 });
+console.log(`genererte ${missing.join(' og ')}`);
+NODE
+) || die "Klarte ikke skrive $DP_SECRETS_FILE"
+
+if [[ "$secrets_result" == "finnes" ]]; then
+  ok "Signeringsnøkler finnes"
+else
+  ok "Ed25519-nøkler: $secrets_result"
+fi
+
 # ----------------------------------------------------------------- dialogporten
 
 step "Starter Dialogporten"
@@ -162,6 +234,16 @@ step "Starter Dialogporten"
   # første gang, og et stille script ser ut som et hengt script.
   docker compose build dialogporten-graphql dialogporten-webapi
   LOCALTEST_PID="$LOCALTEST_PID" docker compose up -d dialogporten-graphql dialogporten-webapi dialogporten-webapi-ingress >/dev/null 2>&1
+
+  # nginx slår opp `dialogporten-webapi` én gang, ved oppstart, og holder på IP-en.
+  # Bygget over gir webapi et nytt image, så compose lager containeren på nytt med ny
+  # IP — mens ingressen står urørt og fortsetter å peke på den gamle. Den IP-en er som
+  # regel gjenbrukt av en annen container i mellomtiden, og da svarer :7214 med 404 på
+  # alt bortsett fra /health (som *alle* tjenestene svarer på, så helsesjekken under
+  # ser grønn ut mens hele API-et er borte). Symptomet er at sync-adapteren melder
+  # «FEIL ved opprettelse (404)» på hver instans og innboksen blir tom.
+  # En restart tvinger nginx til å slå opp navnet på nytt og koster et sekund.
+  docker compose restart dialogporten-webapi-ingress >/dev/null 2>&1
 )
 ok "Containere startet"
 
@@ -173,8 +255,19 @@ wait_for 300 "Dialogporten GraphQL" dp_ready \
   || die "Dialogporten svarte ikke. Første bygg tar noen minutter — se: docker logs digdir-dialogporten-graphql-1"
 ok "GraphQL på :7220"
 
-wait_for 180 "Dialogporten WebApi" curl -sf -o /dev/null "http://localhost:7214/health" \
-  || warn "WebApi (:7214) svarer ikke — sync-adapteren vil feile"
+# Sjekker en ekte API-rute, ikke /health: helsesjekken svares av *alle* tjenestene i
+# stacken, så den ville meldt grønt selv om ingressen peker på feil container og hele
+# serviceowner-API-et gir 404. Det er nettopp den ruten sync-adapteren bruker.
+# 404 er den interessante feilen; alt annet (200 lokalt, 401/400 med auth på) betyr at
+# ruten finnes og at ingressen treffer riktig tjeneste.
+webapi_ready() {
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    http://localhost:7214/api/v1/serviceowner/dialogs || echo 000)
+  [[ "$code" != "000" && "$code" != "404" ]]
+}
+wait_for 180 "Dialogporten WebApi" webapi_ready \
+  || warn "WebApi-API-et på :7214 svarer ikke (eller gir 404) — sync-adapteren vil feile"
 ok "WebApi på :7214"
 
 ACTIVE_PID=$(curl -s -X POST http://localhost:7220/graphql -H 'Content-Type: application/json' \

@@ -184,7 +184,9 @@ og skal **ikke** merges oppstrøms.
 | Tom innboks | Brukeren i LocalTest matcher ikke den du er logget inn som |
 | Adapteren sier «hoppet over» | Testbrukerens fnr består ikke mod-11 |
 | Tilbakelenken mangler dialog | Adapteren kjørte ikke da instansen ble laget |
+| Adapteren sier «FEIL ved opprettelse (404)» på alt | Ingressen på :7214 er nginx, og den slår opp `dialogporten-webapi` bare ved oppstart. Ble webapi bygget på nytt, peker den på gammel IP — ofte en annen container, som svarer 200 på `/health` og 404 på resten: `docker compose restart dialogporten-webapi-ingress` |
 | Havner på en OIDC-side | `LOCAL_DEV_PID` nådde ikke containeren: `docker compose up -d --force-recreate bff` |
+| «venter på Dialogporten GraphQL» i 300 s, så avbrudd | Signeringsnøklene mangler. `appsettings.Development.json` har `"TODO: Add to local secrets"` for `Application:Dialogporten:Ed25519KeyPairs`, og den strengen er ikke base64 — containeren står «Up», men hvert kall dør i `FormatException`. `start.sh` genererer nøklene; slett `~/.microsoft/usersecrets/<UserSecretsId>/secrets.json` for å få nye |
 | BFF crash-looper | `docker logs bff` — som regel at `oidc-static` ikke svarer |
 | Konflikt på navnet `redis` | Altinn Studio designer holder det: `docker rm -f redis` (volumet beholdes) |
 | Utkast vises ikke etter endring | Dialoglisten caches i 10 minutter — hard refresh |
