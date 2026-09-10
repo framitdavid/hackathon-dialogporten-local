@@ -7,14 +7,16 @@
 # resolver ikke Dialogporten noen part.
 #
 # LocalTest-testbrukere med gyldig fnr (testdata/Register/Party/):
-#   510001  01899699552  Pengelens Partner
-#   510002  17858296439  Gjentagende Forelder
-#   510003  08829698278  Rik Forelder
+#   51100000  12818800078  Maja Solberg          (userId 9100000)
+#   51100008  19888600100  Marius Dahl           (userId 9100008)
+#   510001    01899699552  Pengelens Partner     (userId 1001)
+#   510002    17858296439  Gjentagende Forelder  (userId 1002)
+#   510003    08829698278  Rik Forelder          (userId 1003)
 services:
   dialogporten-graphql:
     environment:
-      - LocalDevelopment__Pid=${LOCALTEST_PID:-01899699552}
+      - LocalDevelopment__Pid=${LOCALTEST_PID:-12818800078}
 
   dialogporten-webapi:
     environment:
-      - LocalDevelopment__Pid=${LOCALTEST_PID:-01899699552}
+      - LocalDevelopment__Pid=${LOCALTEST_PID:-12818800078}

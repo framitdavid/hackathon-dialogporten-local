@@ -65,14 +65,19 @@ og speiler dem, så flyten kan testes uten den delen av plattformen.
 
 ## Testbrukere
 
-Dialogporten validerer fødselsnummer med mod-11. Bare tre av LocalTest sine personbrukere
-består:
+Dialogporten validerer fødselsnummer med mod-11, og de fleste av LocalTest sine
+standardbrukere består ikke. Disse fem virker:
 
-| Party | Fødselsnummer | Navn | LocalTest UserId |
-|---|---|---|---|
-| 510001 | `01899699552` | Pengelens Partner | 1001 |
-| 510002 | `17858296439` | Gjentagende Forelder | 1002 |
-| 510003 | `08829698278` | Rik Forelder | 1003 |
+| Party | Fødselsnummer | Navn | LocalTest UserId | |
+|---|---|---|---|---|
+| 51100000 | `12818800078` | Maja Solberg | 9100000 | **standard** |
+| 51100008 | `19888600100` | Marius Dahl | 9100008 | |
+| 510001 | `01899699552` | Pengelens Partner | 1001 | |
+| 510002 | `17858296439` | Gjentagende Forelder | 1002 | |
+| 510003 | `08829698278` | Rik Forelder | 1003 | |
+
+Maja Solberg og Marius Dahl er lagt til lokalt og ligger ikke i den innebygde
+testdataen — de finnes bare i din LocalTest-installasjon. De tre andre er standard.
 
 Sophie Salt, Ola Nordmann, Kari Nordvik og MultiParty Prompt avvises. Adapteren hopper
 over instansene deres og sier ifra i loggen.
@@ -88,7 +93,7 @@ LocalTest :8000 ──► sync-adapter ──► Dialogporten :7214 ──► ar
 ```
 
 1. `./start.sh` — blir stående med sync-adapteren
-2. Logg inn i LocalTest som Pengelens Partner og start en app
+2. Logg inn i LocalTest som Maja Solberg og start en app
 3. Utkastet dukker opp i innboksen innen sekundet
 4. Klikk det → tilbake i utfyllingen. «Tilbake til innboks» tar deg tilbake til dialogen
 
@@ -96,7 +101,7 @@ Adapteren må kjøre for at nye instanser skal få `dialog.id`, så `start.sh` b
 med den i forgrunnen. Ctrl+C stopper den, eller `./stop.sh` fra et annet vindu. Med
 `--no-sync` returnerer scriptet i stedet, men da må du starte adapteren selv.
 
-Bytt bruker uten omstart: `https://app.localhost/api/login?pid=17858296439`. Velg samme
+Bytt bruker uten omstart: `https://app.localhost/api/login?pid=19888600100`. Velg samme
 bruker i LocalTest — instansene må eies av den du ser innboksen til.
 
 ## Kommandoer

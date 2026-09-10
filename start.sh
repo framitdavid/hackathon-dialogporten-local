@@ -3,7 +3,7 @@
 # Setter opp hele den lokale Dialogporten-stacken og åpner innboksen.
 #
 #   ./start.sh                      # alt opp, nettleser åpnes
-#   ./start.sh --pid 17858296439    # kjør som en annen LocalTest-testbruker
+#   ./start.sh --pid 19888600100    # kjør som en annen LocalTest-testbruker
 #   ./start.sh --no-open            # ikke åpne nettleser
 #   ./start.sh --no-sync            # ikke bli stående med sync-adapteren
 #   ./start.sh --rebuild            # bygg Dialogporten-imagene helt på nytt
@@ -21,7 +21,8 @@ FRONTEND="$ROOT/dialogporten-frontend"
 DIALOGPORTEN="$ROOT/dialogporten"
 SYNC="$ROOT/sync-adapter"
 
-LOCALTEST_PID="${LOCALTEST_PID:-01899699552}"
+# Maja Solberg (LocalTest userId 9100000, party 51100000)
+LOCALTEST_PID="${LOCALTEST_PID:-12818800078}"
 OPEN_BROWSER=1
 RUN_SYNC=1
 REBUILD=0
