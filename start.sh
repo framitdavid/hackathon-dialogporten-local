@@ -12,6 +12,10 @@
 #
 set -euo pipefail
 
+# set -e avslutter uten et ord hvis en kommando feiler. Denne fellen sørger for at
+# scriptet alltid sier hvor det stoppet — en stille død er nesten umulig å feilsøke.
+trap 'code=$?; if (( code )); then printf "\n\033[31m✗ Avbrutt på linje %s (exit %s)\033[0m\n" "$LINENO" "$code" >&2; fi' EXIT
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND="$ROOT/dialogporten-frontend"
 DIALOGPORTEN="$ROOT/dialogporten"
@@ -101,19 +105,34 @@ step "Sertifikater"
 CERT_HOSTS=(app.localhost localhost docs.localhost dashboard.localhost
             pgadmin4.localhost redisinsight.localhost oidc-static.localhost)
 
+# Katalogen er tom i git (oppstrøms .gitignore har certs/*), så den finnes ikke etter
+# en fersk klone. Uten den feiler mkcert med "no such file or directory".
+mkdir -p "$FRONTEND/certs"
+
 if [[ ! -f "$FRONTEND/certs/cert.pem" || ! -f "$FRONTEND/certs/key.pem" ]]; then
-  command -v mkcert >/dev/null 2>&1 || die "mkcert mangler. Kjør: brew install mkcert nss && mkcert -install"
-  ( cd "$FRONTEND" && mkcert -cert-file certs/cert.crt -key-file certs/key.pem "${CERT_HOSTS[@]}" >/dev/null 2>&1 \
-    && openssl x509 -in certs/cert.crt -out certs/cert.pem -outform PEM )
-  ok "Genererte sertifikat"
+  command -v mkcert >/dev/null 2>&1 || die "mkcert mangler. Kjør: brew install mkcert nss && sudo mkcert -install"
+  if ! cert_log=$( cd "$FRONTEND" && mkcert -cert-file certs/cert.crt -key-file certs/key.pem "${CERT_HOSTS[@]}" 2>&1 ); then
+    printf '%s\n' "$cert_log" | sed 's/^/    /' >&2
+    die "mkcert klarte ikke lage sertifikat"
+  fi
+  if ! openssl_log=$( openssl x509 -in "$FRONTEND/certs/cert.crt" -out "$FRONTEND/certs/cert.pem" -outform PEM 2>&1 ); then
+    printf '%s\n' "$openssl_log" | sed 's/^/    /' >&2
+    die "openssl klarte ikke konvertere sertifikatet"
+  fi
+  ok "Genererte sertifikat for ${#CERT_HOSTS[@]} navn"
 else
   ok "Sertifikat finnes"
 fi
 
 # BFF henter OIDC-discovery over HTTPS ved oppstart og må stole på mkcert-CA-en.
 if [[ ! -f "$FRONTEND/certs/rootCA.pem" ]] && command -v mkcert >/dev/null 2>&1; then
-  cp "$(mkcert -CAROOT)/rootCA.pem" "$FRONTEND/certs/"
-  ok "Kopierte mkcert rot-CA"
+  caroot=$(mkcert -CAROOT 2>/dev/null || true)
+  if [[ -n "$caroot" && -f "$caroot/rootCA.pem" ]]; then
+    cp "$caroot/rootCA.pem" "$FRONTEND/certs/"
+    ok "Kopierte mkcert rot-CA"
+  else
+    warn "Fant ingen rot-CA i ${caroot:-ukjent CAROOT} — kjør: sudo mkcert -install"
+  fi
 fi
 [[ -f "$FRONTEND/certs/rootCA.pem" ]] || warn "certs/rootCA.pem mangler — BFF klarer neppe å starte"
 
