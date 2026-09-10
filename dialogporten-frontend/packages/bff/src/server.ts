@@ -12,7 +12,7 @@ import session from '@fastify/session';
 import RedisStore from 'connect-redis';
 import Fastify, { type FastifyError } from 'fastify';
 import fastifyGraphiql from 'fastify-graphiql';
-import { oidc, userApi, verifyToken } from './auth/index.ts';
+import { devUserSwitch, oidc, userApi, verifyToken } from './auth/index.ts';
 import healthChecks from './azure/HealthChecks.ts';
 import healthProbes from './azure/HealthProbes.ts';
 import config from './config.ts';
@@ -102,6 +102,7 @@ const startServer = async (): Promise<void> => {
   server.register(healthChecks, { version });
   server.register(oidc);
   server.register(userApi);
+  server.register(devUserSwitch);
   server.register(featureApi, {
     appConfigConnectionString,
   });

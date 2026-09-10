@@ -25,6 +25,7 @@ import { getSearchStringFromQueryParams, type PartyGroup } from '../../pages/Inb
 import { useProfile } from '../../pages/Profile/useProfile.tsx';
 import { PageRoutes } from '../../pages/routes.ts';
 import { useGlobalState } from '../../useGlobalState.ts';
+import { DevUserSwitcher } from '../DevUserSwitcher/DevUserSwitcher.tsx';
 import { useAuth } from '../Login/AuthContext.tsx';
 import { useFooter } from './Footer/useFooter.ts';
 import { useGlobalMenu } from './GlobalMenu/useGlobalMenu.ts';
@@ -231,6 +232,8 @@ export const PageLayout: React.FC = () => {
       {isSkyraEnabled && <SkyraSurvey consent={consent.statistics} />}
       <Outlet />
       <Snackbar />
+      {/* Renders nothing unless the BFF exposes /api/dev/*, i.e. only in local development. */}
+      <DevUserSwitcher />
     </Layout>
   );
 };

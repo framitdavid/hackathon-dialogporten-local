@@ -19,6 +19,12 @@ public sealed class LocalDevelopmentSettings
     public bool DisablePolicyInformationSyncOnStartup { get; set; } = true;
     public bool UseLocalDevelopmentPartyNameRegistry { get; set; } = true;
     public bool UseLocalMetricsAggregationStorage { get; set; } = true;
+
+    /// <summary>
+    /// Skip MOD11 control digit checks on party identifiers so synthetic test data
+    /// (e.g. Altinn Studio LocalTest parties) can be used as dialog parties.
+    /// </summary>
+    public bool DisablePartyIdentifierControlDigits { get; set; } = true;
 }
 
 public static class LocalDevelopmentSettingsExtensions

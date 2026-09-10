@@ -36,6 +36,10 @@ const STORAGE =
   process.env.LOCALTEST_STORAGE ??
   path.join(os.homedir(), 'Library/Application Support/altinn-studio/data/AltinnPlatformLocal');
 const INSTANCE_DIR = path.join(STORAGE, 'documentdb/instances');
+// Partsregisteret ligger utenfor AltinnPlatformLocal og er ren testdata på disk.
+// LocalTests /register/api/v1/parties/lookup kjenner ikke disse partene — den svarer 404
+// for alt annet enn parter den selv har registrert — så navnene må leses fra filene.
+const PARTY_DIR = path.join(STORAGE, '..', 'testdata/Register/Party');
 const DP_API = (process.env.DIALOGPORTEN_API ?? 'http://localhost:7214').replace(/\/$/, '');
 // LocalTest må treffes direkte på :8000 over http. Bak en TLS-proxy bygger den
 // redirect-URL-er fra Host-headeren, mister porten, og sender deg til feil origin.
@@ -45,43 +49,85 @@ const LOCALTEST_BASE = (process.env.LOCALTEST_BASE ?? 'http://local.altinn.cloud
 
 /* ---------- part-identifikatorer ---------- */
 
-const W1 = [3, 7, 6, 1, 8, 9, 4, 5, 2];
-const W2 = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
-const controlDigit = (digits, weights) => {
-  const sum = weights.reduce((acc, w, i) => acc + w * Number(digits[i]), 0);
-  const rest = 11 - (sum % 11);
-  return rest === 11 ? 0 : rest;
-};
+/*
+ * Kun form, ikke mod-11-kontrollsiffer. En lokal Dialogporten kjører med
+ * LocalDevelopment.DisablePartyIdentifierControlDigits, og krever da bare riktig
+ * lengde og at alt er siffer (PartyIdentifierValidation.SkipControlDigits).
+ *
+ * Syntetiske LocalTest-numre har stort sett ugyldige kontrollsiffer — Sophie Salt
+ * (01039012345) og DDG Fitness (897069650) er to av dem — så en mod-11-sjekk her
+ * ville kastet ut det meste av testdataene før de nådde Dialogporten.
+ */
+const isValidSsn = (v) => typeof v === 'string' && /^\d{11}$/.test(v);
+const isValidOrgNo = (v) => typeof v === 'string' && /^\d{9}$/.test(v);
 
 /**
- * Dialogporten avviser fødselsnummer som ikke har gyldig mod-11-kontrollsiffer
- * (NorwegianPersonIdentifier.IsValid). Flere LocalTest-testbrukere — blant andre
- * Ola Nordmann og Sophie Salt — har syntetiske numre som ikke består testen.
+ * partyId -> visningsnavn, lest fra testdatafilene.
+ *
+ * Navnet blir med videre i dialogens externalReference som "|owner=<navn>", slik at
+ * konsumenter (brukervelgeren i innboksen) kan vise noe annet enn et elleve­sifret tall.
+ * Dialogporten kan ikke slå det opp selv: det lokale partsnavnregisteret svarer med en
+ * fast plassholder for alle identifikatorer.
  */
-const isValidSsn = (v) =>
-  typeof v === 'string' &&
-  /^\d{11}$/.test(v) &&
-  controlDigit(v, W1) === Number(v[9]) &&
-  controlDigit(v, W2) === Number(v[10]);
+/**
+ * Navn LocalTest har registrert selv, som Tenor-brukere, finnes ikke som fil under
+ * testdata/Register/Party. De må hentes over API-et i stedet. Svaret bufres — også et
+ * bomtreff, siden en identifikator LocalTest ikke kjenner ikke begynner å kjenne den.
+ */
+const lookedUpNames = new Map();
 
-/** Organisasjonsnummer valideres også med mod-11, med egne vekter. */
-const ORG_W = [3, 2, 7, 6, 5, 4, 3, 2];
-const isValidOrgNo = (v) => {
-  if (typeof v !== 'string' || !/^\d{9}$/.test(v)) return false;
-  const c = controlDigit(v, ORG_W);
-  return c < 10 && c === Number(v[8]);
+const lookupName = async (owner) => {
+  const key = owner.personNumber ?? owner.organisationNumber;
+  if (lookedUpNames.has(key)) return lookedUpNames.get(key);
+
+  const body = owner.personNumber ? { Ssn: owner.personNumber } : { OrgNo: owner.organisationNumber };
+  let name = null;
+  try {
+    const res = await fetch(`${LOCALTEST_BASE}/register/api/v1/parties/lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) name = (await res.json())?.name?.trim() || null;
+  } catch {
+    // LocalTest nede eller ukjent part — da står identifikatoren som navn.
+  }
+  lookedUpNames.set(key, name);
+  return name;
 };
+
+/** Legger på "|owner=<navn>" når navnet er kjent. Uten navn står referansen som før. */
+const ownerMarker = (name, reference) => (name ? `${reference}|owner=${name}` : reference);
+
+const partyNames = (() => {
+  const names = new Map();
+  let files = [];
+  try {
+    files = fs.readdirSync(PARTY_DIR).filter((f) => f.endsWith('.json'));
+  } catch {
+    return names; // Ingen testdata på denne maskinen — da blir det bare identifikatorer.
+  }
+  for (const file of files) {
+    try {
+      const party = JSON.parse(fs.readFileSync(path.join(PARTY_DIR, file), 'utf8'));
+      if (party?.partyId && party?.name) names.set(String(party.partyId), party.name);
+    } catch {
+      // En ulesbar fil skal ikke stoppe synken.
+    }
+  }
+  return names;
+})();
 
 const partyUrn = (owner) => {
   if (owner?.organisationNumber) {
     if (!isValidOrgNo(owner.organisationNumber)) {
-      return { error: `orgnr ${owner.organisationNumber} har ugyldig kontrollsiffer — Dialogporten avviser det` };
+      return { error: `orgnr ${owner.organisationNumber} er ikke 9 siffer — Dialogporten avviser det` };
     }
     return { urn: `urn:altinn:organization:identifier-no:${owner.organisationNumber}` };
   }
   if (owner?.personNumber) {
     if (!isValidSsn(owner.personNumber)) {
-      return { error: `fnr ${owner.personNumber} har ugyldig kontrollsiffer — Dialogporten avviser det` };
+      return { error: `fnr ${owner.personNumber} er ikke 11 siffer — Dialogporten avviser det` };
     }
     return { urn: `urn:altinn:person:identifier-no:${owner.personNumber}` };
   }
@@ -124,7 +170,7 @@ const text = (value, languageCode = 'nb') => ({ mediaType: 'text/plain', value: 
 /** guiActions[].title er derimot en ren liste av lokaliseringer, uten mediaType. */
 const label = (value, languageCode = 'nb') => [{ languageCode, value }];
 
-const toDialog = (instance) => {
+const toDialog = async (instance) => {
   const [org, app] = (instance.appId ?? '').split('/');
   const { urn: party, error } = partyUrn(instance.instanceOwner);
   if (error) return { skip: error };
@@ -132,6 +178,8 @@ const toDialog = (instance) => {
   if (instance.status?.isHardDeleted) return { skip: 'hard-slettet' };
 
   const partyId = instance.instanceOwner.partyId;
+  // Filene først: de dekker de statiske testpartene, som LocalTest-API-et ikke svarer for.
+  const ownerName = partyNames.get(String(partyId)) ?? (await lookupName(instance.instanceOwner));
   const status = statusFor(instance);
   const task = instance.process?.currentTask;
   const summary = task?.name
@@ -146,7 +194,7 @@ const toDialog = (instance) => {
       serviceResource: `urn:altinn:resource:app_${org}_${app}`,
       party,
       status,
-      externalReference: `urn:altinn:instance:${partyId}/${instance.id}`,
+      externalReference: ownerMarker(ownerName, `urn:altinn:instance:${partyId}/${instance.id}`),
       createdAt: instance.created,
       updatedAt: instance.lastChanged ?? instance.created,
       visibleFrom: instance.visibleAfter && Date.parse(instance.visibleAfter) > Date.now() ? instance.visibleAfter : undefined,
@@ -240,7 +288,7 @@ const syncFile = async (file) => {
   const fingerprint = `${instance.lastChanged}|${statusFor(instance)}`;
   if (lastSeen.get(file) === fingerprint) return;
 
-  const mapped = toDialog(instance);
+  const mapped = await toDialog(instance);
   if (mapped.skip) {
     if (VERBOSE) console.log(`  hoppet over ${file}: ${mapped.skip}`);
     lastSeen.set(file, fingerprint);

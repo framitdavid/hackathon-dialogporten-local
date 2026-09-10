@@ -36,8 +36,19 @@ public sealed class NorwegianPersonIdentifier : IPartyIdentifier
     public static bool IsValid(ReadOnlySpan<char> value)
     {
         var idNumberWithoutPrefix = PartyIdentifier.GetIdPart(value);
-        return idNumberWithoutPrefix.Length == 11
-               && Mod11.TryCalculateControlDigit(idNumberWithoutPrefix[..9], SocialSecurityNumberWeights1, out var control1)
+
+        if (idNumberWithoutPrefix.Length != 11)
+        {
+            return false;
+        }
+
+        // Mod11 rejects non-digits, so an explicit digit check is only needed when skipping it.
+        if (PartyIdentifierValidation.SkipControlDigits)
+        {
+            return PartyIdentifierValidation.IsAllDigits(idNumberWithoutPrefix);
+        }
+
+        return Mod11.TryCalculateControlDigit(idNumberWithoutPrefix[..9], SocialSecurityNumberWeights1, out var control1)
                && Mod11.TryCalculateControlDigit(idNumberWithoutPrefix[..10], SocialSecurityNumberWeights2, out var control2)
                && control1 == int.Parse(idNumberWithoutPrefix[9..10], CultureInfo.InvariantCulture)
                && control2 == int.Parse(idNumberWithoutPrefix[10..11], CultureInfo.InvariantCulture);

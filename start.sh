@@ -265,6 +265,10 @@ fi
 
 INSTANCE_DIR="$HOME/Library/Application Support/altinn-studio/data/AltinnPlatformLocal/documentdb/instances"
 
+# Uten --party synkes alle parter, ikke bare den innloggede. Brukervelgeren i innboksen
+# lister nettopp de partene som har dialoger, så et partsfilter her ville gjort at den bare
+# hadde én bruker å velge mellom.
+#
 # Watcheren synker alt ved oppstart, så en egen --once-runde her ville bare gjort
 # jobben to ganger. Den kjøres derfor kun når vi ikke blir stående med watcheren.
 if [[ ! -d "$INSTANCE_DIR" ]]; then
@@ -273,7 +277,7 @@ if [[ ! -d "$INSTANCE_DIR" ]]; then
   RUN_SYNC=0
 elif (( ! RUN_SYNC )); then
   step "Synker LocalTest-instanser"
-  node "$SYNC/localtest-sync.mjs" --once --party "$LOCALTEST_PID" 2>&1 \
+  node "$SYNC/localtest-sync.mjs" --once 2>&1 \
     | grep -vE '^(Dialogporten|LocalTest|Partsfilter) ' || true
 fi
 
@@ -286,7 +290,7 @@ cat <<EOF
   LocalTest    http://local.altinn.cloud:8000
   Dialogporten http://localhost:7214/swagger
 
-  Testbruker   $LOCALTEST_PID
+  Testbruker   $LOCALTEST_PID  (bytt bruker nede til venstre i innboksen)
 EOF
 
 if (( OPEN_BROWSER )); then
@@ -299,8 +303,8 @@ if (( RUN_SYNC )); then
   # «tilbake til innboks» stille tilbake til LocalTests forside. Derfor standard.
   # exec erstatter skallet, så EXIT-fellen fyrer ikke på et vanlig Ctrl+C.
   step "Sync-adapter kjører — Ctrl+C for å avslutte"
-  exec node "$SYNC/localtest-sync.mjs" --party "$LOCALTEST_PID"
+  exec node "$SYNC/localtest-sync.mjs"
 fi
 
 warn "Sync-adapteren kjører ikke (--no-sync). Nye instanser får ikke dialog.id."
-echo "  Start den med: node sync-adapter/localtest-sync.mjs --party $LOCALTEST_PID"
+echo "  Start den med: node sync-adapter/localtest-sync.mjs"

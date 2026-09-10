@@ -42,6 +42,16 @@ const envVariables = z.object({
   CONTAINER_APP_REPLICA_NAME: z.string().default(''),
   ENABLE_GRAPHIQL: z.preprocess(stringToBoolean, z.boolean().default(true)),
   ENABLE_INIT_SESSION_ENDPOINT: z.preprocess(stringToBoolean, z.boolean().default(false)),
+  /* Local development only: exposes /api/dev/* so the inbox can switch which person the session
+     belongs to. Off by default, and set nowhere but this repo's compose.yml — the switch endpoint
+     mints a session for any person identifier with no authentication whatsoever. */
+  ENABLE_DEV_USER_SWITCH: z.preprocess(stringToBoolean, z.boolean().default(false)),
+  /* Dialogporten's service owner API. A separate variable from DIALOGPORTEN_URL, which points at
+     GraphQL: the end user schema only ever answers for the caller's own parties, so listing every
+     party that holds a dialog has to go through the service owner search. */
+  DIALOGPORTEN_SERVICEOWNER_URL: z.string().default('http://host.docker.internal:7214'),
+  /* Altinn LocalTest, used only to turn a personal identifier into a display name. */
+  LOCALTEST_URL: z.string().default('http://host.docker.internal:8000'),
   /* Local development only: when set to a Norwegian personal identifier, /api/login mints a session
      for that person instead of redirecting to ID-porten. Empty in every deployed environment. */
   LOCAL_DEV_PID: z.string().default(''),
@@ -93,12 +103,15 @@ const config = {
   redisConnectionString: env.REDIS_CONNECTION_STRING,
   migrationRun: env.MIGRATION_RUN,
   dialogporten: {
+    serviceOwnerApiUrl: env.DIALOGPORTEN_SERVICEOWNER_URL,
     graphqlUrl: `${env.DIALOGPORTEN_URL}/graphql`,
     graphqlSubscriptionUrl: `${env.DIALOGPORTEN_URL}/graphql/stream`,
     healthUrl: `${env.DIALOGPORTEN_URL}/health`,
   },
   enableGraphiql: env.ENABLE_GRAPHIQL,
   enableInitSessionEndpoint: env.ENABLE_INIT_SESSION_ENDPOINT,
+  enableDevUserSwitch: env.ENABLE_DEV_USER_SWITCH,
+  localtestUrl: env.LOCALTEST_URL,
   localDevPid: env.LOCAL_DEV_PID,
   appConfigConnectionString: env.APP_CONFIG_CONNECTION_STRING,
   authContextCookieDomain: env.AUTH_CONTEXT_COOKIE_DOMAIN,

@@ -9,6 +9,7 @@ using Digdir.Domain.Dialogporten.Application.Common.Extensions;
 using Digdir.Domain.Dialogporten.Application.Externals;
 using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
 using Digdir.Domain.Dialogporten.Application.Features.V1.Common.ServiceResourceMetadata;
+using Digdir.Domain.Dialogporten.Domain.Parties;
 using Digdir.Domain.Dialogporten.Domain.SubjectResources;
 using Digdir.Domain.Dialogporten.Infrastructure.Altinn.AccessManagement;
 using Digdir.Domain.Dialogporten.Infrastructure.Altinn.Authorization;
@@ -365,6 +366,11 @@ public static class InfrastructureExtensions
         }
 
         var localDeveloperSettings = configuration.GetLocalDevelopmentSettings();
+
+        // Static, because party identifiers are validated in the domain layer with no DI available.
+        // Reachable only from this development-only branch, so it cannot be turned on when deployed.
+        PartyIdentifierValidation.SkipControlDigits = localDeveloperSettings.DisablePartyIdentifierControlDigits;
+
         services
             .ReplaceTransient<ICloudEventBus, ConsoleLogEventBus>(predicate: localDeveloperSettings.UseLocalDevelopmentCloudEventBus)
             .ReplaceTransient<IResourceRegistry, LocalDevelopmentResourceRegistry>(predicate: localDeveloperSettings.UseLocalDevelopmentResourceRegister)

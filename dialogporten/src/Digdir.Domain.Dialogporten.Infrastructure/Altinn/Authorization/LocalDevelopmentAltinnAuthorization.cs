@@ -3,6 +3,7 @@ using Digdir.Domain.Dialogporten.Application.Common.Authorization;
 using Digdir.Domain.Dialogporten.Application.Common.Extensions;
 using Digdir.Domain.Dialogporten.Application.Externals;
 using Digdir.Domain.Dialogporten.Application.Externals.AltinnAuthorization;
+using Digdir.Domain.Dialogporten.Domain.Common;
 using Digdir.Domain.Dialogporten.Domain.Dialogs.Entities;
 using Digdir.Domain.Dialogporten.Domain.Parties;
 using Digdir.Domain.Dialogporten.Domain.Parties.Abstractions;
@@ -75,15 +76,47 @@ internal sealed class LocalDevelopmentAltinnAuthorization : IAltinnAuthorization
         return authorizedResources;
     }
 
-    public async Task<AuthorizedPartiesResult> GetAuthorizedParties(IPartyIdentifier authenticatedParty, bool _ = false, CancellationToken __ = default)
-        => await Task.FromResult(new AuthorizedPartiesResult
+    /// <summary>
+    /// The authenticated person, named after the dialogs it holds.
+    /// </summary>
+    /// <remarks>
+    /// Without this the party switcher shows a fixed placeholder for everyone, which makes one
+    /// local test user indistinguishable from the next. The name is read off the dialogs
+    /// themselves — see <see cref="LocalDevelopmentPartyName"/> for why it lives there.
+    /// </remarks>
+    public async Task<AuthorizedPartiesResult> GetAuthorizedParties(
+        IPartyIdentifier authenticatedParty,
+        bool _ = false,
+        CancellationToken cancellationToken = default)
+    {
+        // Read once for both the party and its sub party; a local database is small enough that
+        // this costs nothing, and the alternative is two queries for the same rows.
+        var namesByParty = (await _db.Dialogs
+                .AsNoTracking()
+                .Where(dialog => !dialog.Deleted)
+                .Select(dialog => new { dialog.Party, dialog.ExternalReference })
+                .ToListAsync(cancellationToken))
+            .GroupBy(dialog => dialog.Party, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group
+                    .Select(dialog => LocalDevelopmentPartyName.FromExternalReference(dialog.ExternalReference))
+                    .FirstOrDefault(name => name is not null),
+                StringComparer.Ordinal);
+
+        string NameOf(string party)
+        {
+            return namesByParty.GetValueOrDefault(party) ?? LocalDevelopmentPartyName.Fallback(party);
+        }
+
+        return new AuthorizedPartiesResult
         {
             AuthorizedParties = [new()
                 {
                     Party = authenticatedParty.FullId,
                     PartyUuid = DeterministicUuid(authenticatedParty.FullId),
                     PartyId = 0,
-                    Name = $"Local Party ({authenticatedParty.Id})",
+                    Name = NameOf(authenticatedParty.FullId),
                     DateOfBirth = null,
                     PartyType = AuthorizedPartyType.Person,
                     IsDeleted = false,
@@ -102,7 +135,7 @@ internal sealed class LocalDevelopmentAltinnAuthorization : IAltinnAuthorization
                             Party = LocalSubParty,
                             PartyUuid = DeterministicUuid(LocalSubParty),
                             PartyId = 0,
-                            Name = "Local Sub Party",
+                            Name = NameOf(LocalSubParty),
                             DateOfBirth = null,
                             PartyType = AuthorizedPartyType.Person,
                             IsDeleted = false,
@@ -121,7 +154,8 @@ internal sealed class LocalDevelopmentAltinnAuthorization : IAltinnAuthorization
                     ParentParty = null
                 }
             ]
-        });
+        };
+    }
 
     public async Task<AuthorizedPartiesResult> GetAuthorizedPartiesForLookup(
         IPartyIdentifier authenticatedParty,

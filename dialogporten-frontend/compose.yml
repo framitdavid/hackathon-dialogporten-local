@@ -167,6 +167,15 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES}
       APP_CONFIG_CONNECTION_STRING: ${APP_CONFIG_CONNECTION_STRING}
       ENABLE_INIT_SESSION_ENDPOINT: true
+      # Lokal brukervelger i innboksen: eksponerer /api/dev/* slik at du kan bytte hvilken
+      # person sesjonen tilhører. Endepunktet lager en sesjon for et hvilket som helst
+      # fødselsnummer uten autentisering, så det settes kun her.
+      ENABLE_DEV_USER_SWITCH: true
+      # Dialogportens service owner-API (7214). Egen variabel fordi DIALOGPORTEN_URL peker på
+      # GraphQL (7220), som bare svarer for partene den innloggede allerede har tilgang til.
+      DIALOGPORTEN_SERVICEOWNER_URL: ${DIALOGPORTEN_SERVICEOWNER_URL:-http://host.docker.internal:7214}
+      # Brukes kun til å slå opp visningsnavn for et fødselsnummer.
+      LOCALTEST_URL: ${LOCALTEST_URL:-http://host.docker.internal:8000}
       # Lokal innlogging uten ID-porten: /api/login lager sesjonen direkte for denne
       # personen. Tom verdi gir vanlig OIDC-flyt.
       LOCAL_DEV_PID: ${LOCAL_DEV_PID:-}
