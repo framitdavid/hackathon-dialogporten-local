@@ -221,8 +221,20 @@ login_ok() {
 if wait_for 60 "innlogging" login_ok; then
   ok "/api/login logger inn som $LOCALTEST_PID uten ID-porten"
 else
-  warn "/api/login peker fortsatt på OIDC — sjekk at LOCAL_DEV_PID nådde containeren:"
-  warn "  docker exec bff sh -c 'echo \$LOCAL_DEV_PID'"
+  # Docker compose gjenskaper ikke en container når bare .env har endret seg, så en
+  # bff fra et tidligere forsøk kan sitte igjen uten LOCAL_DEV_PID. Symptomet er at du
+  # sendes til en OIDC-side som ikke finnes. Tving fram en ny container og prøv igjen.
+  warn "/api/login peker på OIDC — gjenskaper bff med riktig miljø"
+  ( cd "$FRONTEND" && docker compose up -d --force-recreate bff >/dev/null 2>&1 ) || true
+  wait_for 180 "BFF" bff_ready || true
+
+  if wait_for 60 "innlogging" login_ok; then
+    ok "/api/login logger inn som $LOCALTEST_PID uten ID-porten"
+  else
+    warn "Innloggingen virker fortsatt ikke. Sjekk at variabelen nådde containeren:"
+    warn "  docker exec bff sh -c 'echo \$LOCAL_DEV_PID'   (skal gi $LOCALTEST_PID)"
+    warn "  grep LOCAL_DEV_PID $FRONTEND/.env"
+  fi
 fi
 
 INSTANCE_DIR="$HOME/Library/Application Support/altinn-studio/data/AltinnPlatformLocal/documentdb/instances"
