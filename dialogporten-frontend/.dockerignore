@@ -4,3 +4,17 @@ build
 .gitignore
 *.md
 dist
+
+# Genereres lokalt og hører ikke hjemme i imaget. Konfigurasjonen kommer fra
+# compose sitt environment, og sertifikatene mountes inn i containerne.
+# Å ha dem i konteksten gjør bare at COPY-laget invalideres når de endrer seg —
+# for eksempel ved bytte av testbruker.
+.env
+certs/
+oidc-static/login/
+
+# Testartefakter
+test-results/
+playwright-report/
+blob-report/
+axe-reports/

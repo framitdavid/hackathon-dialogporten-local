@@ -152,7 +152,9 @@ step "Starter Dialogporten"
 (
   cd "$DIALOGPORTEN"
   [[ -f .env ]] || cp "$ROOT/dialogporten-env.template" .env
-  LOCALTEST_PID="$LOCALTEST_PID" docker compose -f docker-compose-db-redis.yml up -d >/dev/null 2>&1
+  # redisinsight i den fila er kun en GUI — hopp over den.
+  LOCALTEST_PID="$LOCALTEST_PID" docker compose -f docker-compose-db-redis.yml up -d \
+    dialogporten-postgres dialogporten-redis dialogporten-migrations >/dev/null 2>&1
   if (( REBUILD )); then
     LOCALTEST_PID="$LOCALTEST_PID" docker compose build --no-cache dialogporten-graphql dialogporten-webapi >/dev/null 2>&1
   fi
@@ -194,18 +196,16 @@ if docker ps -a --format '{{.Names}}' | grep -qx redis; then
   fi
 fi
 
-# Bygget må kjøres eksplisitt: uten det gjenbruker compose et eksisterende image i
-# det uendelige, og et bff-image fra et tidligere forsøk kjenner ikke LOCAL_DEV_PID
-# — da havner du i OIDC-flyten selv om containeren har variabelen.
-#
-# Output vises. Med varm cache tar det sekunder, men første gang kjører pnpm install
-# og turbo build for bff, frontend og docs, og da står scriptet i flere minutter.
-# Uten fremdrift ser det ut som om det har hengt seg.
-# Bare tjenestene dialogflyten trenger. docs er Starlight-dokumentasjonen på
-# docs.localhost og har ingenting med innboksen å gjøre — å bygge den koster et helt
-# ekstra pnpm install. homepage, pgadmin4 og redisinsight er utviklerbekvemmeligheter.
-# Start dem ved behov med: docker compose up -d docs pgadmin4 redisinsight
+# Bare tjenestene dialogflyten faktisk trenger. docs er Starlight-dokumentasjonen på
+# docs.localhost og koster et helt eget pnpm install; homepage, pgadmin4 og
+# redisinsight er utviklerbekvemmeligheter. Start dem ved behov:
+#   cd dialogporten-frontend && docker compose up -d docs pgadmin4 redisinsight
 FE_SERVICES=(reverse-proxy oidc-static redis db bff bff-migration frontend)
+
+# Bygget kjøres eksplisitt: ellers gjenbruker compose et eksisterende image i det
+# uendelige, og et bff-image fra et tidligere forsøk kjenner ikke LOCAL_DEV_PID — da
+# havner du i OIDC-flyten selv om containeren har variabelen. Output vises, for med
+# kald cache tar det minutter og et stille script ser hengt ut.
 
 printf '  bygger images — første gang tar noen minutter\n'
 ( cd "$FRONTEND" && docker compose build "${FE_SERVICES[@]}" ) || die "docker compose build feilet i $FRONTEND"

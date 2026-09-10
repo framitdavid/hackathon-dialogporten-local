@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM node:24.15.0-slim AS build
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
@@ -10,7 +11,10 @@ ENV BUILD_VERSION=${BUILD_VERSION}
 WORKDIR /app
 COPY . .
 
-RUN pnpm install --frozen-lockfile
+# Delt pnpm-lager mellom bygg og mellom images. Uten dette laster hvert image ned
+# alle ~1578 pakkene på nytt fra npm, hver gang.
+RUN --mount=type=cache,target=/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile --store-dir /pnpm/store
 RUN pnpm --filter frontend run build
 
 # `EXPOSE`, `ENV` and `CMD` in this stage is only used for dev
